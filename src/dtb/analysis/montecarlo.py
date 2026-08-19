@@ -137,7 +137,26 @@ def run_monte_carlo(
         if control is not None and not control.checkpoint():
             break
         run_seed = seed0 if n_runs == 1 else derive_seed(seed0, "mc_run", i)
-        result = simulate(model, scenario, seed=run_seed, registry=registry, config=config)
+        # forward the engine's model-time telemetry, rebasing its progress onto
+        # the overall Monte-Carlo progress so the monitor stays meaningful
+        run_index = i
+
+        def run_progress(event: dict[str, Any], _i: int = run_index) -> None:
+            if progress_cb is None:
+                return
+            inner = float(event.get("progress") or 0.0)
+            progress_cb({
+                **event,
+                "phase": "run",
+                "run": _i + 1,
+                "runs": n_runs,
+                "progress": (_i + min(1.0, inner)) / n_runs,
+            })
+
+        result = simulate(
+            model, scenario, seed=run_seed, registry=registry, config=config,
+            progress_cb=run_progress if progress_cb else None,
+        )
         if result.status == "failed":
             failed += 1
             if failed == n_runs:  # every run failed — surface the error
@@ -145,14 +164,12 @@ def run_monte_carlo(
         else:
             results.append(result)
         if progress_cb:
-            progress_cb(
-                {
-                    "phase": "monte_carlo",
-                    "run": i + 1,
-                    "runs": n_runs,
-                    "progress": (i + 1) / n_runs,
-                }
-            )
+            progress_cb({
+                "phase": "monte_carlo",
+                "run": i + 1,
+                "runs": n_runs,
+                "progress": (i + 1) / n_runs,
+            })
 
     mc = MonteCarloResult(
         runs=len(results),
