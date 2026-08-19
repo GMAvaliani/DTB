@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DTB — Цифровой двойник бизнеса</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8F%AD%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <div class="brand">
+      <div class="brand-title">DTB</div>
+      <div class="brand-sub">Цифровой двойник бизнеса</div>
+    </div>
+    <div id="ent-picker"></div>
+    <nav id="nav">
+      <div class="nav-group">Обзор</div>
+      <a href="#/dashboard" data-view="dashboard">Предприятия</a>
+      <a href="#/enterprise" data-view="enterprise">Модель предприятия</a>
+      <div class="nav-group">Модель деятельности</div>
+      <a href="#/goals" data-view="goals">Дерево целей</a>
+      <a href="#/seds" data-view="seds">СЭД / Полезности</a>
+      <a href="#/events" data-view="events">События (НП)</a>
+      <a href="#/org" data-view="org">Оргструктура</a>
+      <a href="#/resources" data-view="resources">Ресурсы и оборудование</a>
+      <a href="#/erp" data-view="erp">ERP-объекты и связи</a>
+      <div class="nav-group">Моделирование</div>
+      <a href="#/scenarios" data-view="scenarios">Сценарии</a>
+      <a href="#/simulate" data-view="simulate">Симуляция</a>
+      <a href="#/results" data-view="results">Результаты и таймлайн</a>
+      <a href="#/forecast" data-view="forecast">Прогноз</a>
+      <a href="#/compare" data-view="compare">Сравнение сценариев</a>
+      <a href="#/optimize" data-view="optimize">Оптимизация</a>
+      <div class="nav-group">Знания и данные</div>
+      <a href="#/graph" data-view="graph">Граф знаний</a>
+      <a href="#/ai" data-view="ai">AI-ассистент</a>
+      <a href="#/import" data-view="import">Импорт / Экспорт</a>
+      <a href="#/versions" data-view="versions">Версии модели</a>
+      <a href="#/audit" data-view="audit">Журнал изменений</a>
+    </nav>
+    <div class="sidebar-footer"><span id="health-dot" class="dot"></span><span id="health-text">…</span></div>
+  </aside>
+  <main id="main"><div class="loading">Загрузка…</div></main>
+</div>
+<div id="modal-root"></div>
+<div id="toast-root"></div>
+<script src="/static/js/api.js"></script>
+<script src="/static/js/charts.js"></script>
+<script src="/static/js/views.js"></script>
+<script src="/static/js/app.js"></script>
+</body>
+</html>
