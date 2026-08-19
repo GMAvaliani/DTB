@@ -1,4 +1,4 @@
-# DTB — Digital Twin of Business's Operations
+# Digital Twin of Business's Operations
 
 Платформа для создания и эксплуатации **цифрового двойника деятельности
 предприятия** (бизнеса, подразделения, системы систем).
