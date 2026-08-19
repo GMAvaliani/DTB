@@ -6,7 +6,10 @@
 function card(title, ...children) {
   const c = el("div", { class: "card" });
   if (title) c.append(el("h3", null, title));
-  c.append(...children);
+  // flatten: views legitimately pass arrays of nodes (rows, steps, issue lists)
+  children.flat().forEach(child => {
+    if (child !== null && child !== undefined) c.append(child);
+  });
   return c;
 }
 
@@ -508,17 +511,21 @@ async function vSimulate(main) {
       el("button", { class: "small", onclick: () => { sessionStorage.setItem("dtb_sim", simId); location.hash = "#/results"; } }, "К результатам"));
     monitor.append(card(`Монитор симуляции ${simId}`, status, el("div", { style: "margin:10px 0" }, bar), stats, controls));
 
+    // events arrive incrementally (engine telemetry, then per-run counters), so
+    // keep the latest known value of every metric instead of rendering one event
+    const acc = {};
     function update(ev) {
-      if (ev.status) status.textContent = ev.status;
-      const p = ev.progress !== undefined ? ev.progress : null;
+      Object.assign(acc, ev);
+      if (acc.status) status.textContent = acc.status;
+      const p = acc.progress !== undefined ? acc.progress : null;
       if (p !== null) bar.firstChild.style.width = `${Math.round(p * 100)}%`;
       stats.innerHTML = "";
-      if (ev.run !== undefined) stats.append(kpiTile("Прогон", `${ev.run}/${ev.runs}`));
-      if (ev.time !== undefined) stats.append(kpiTile("Модельное время", fmtT(ev.time)));
-      if (ev.events !== undefined) stats.append(kpiTile("НП-событий", ev.events));
-      if (ev.moments !== undefined) stats.append(kpiTile("Моментов переключения", ev.moments));
-      if (ev.waiting !== undefined) stats.append(kpiTile("СЭД ожидают", ev.waiting));
-      if (ev.executing !== undefined) stats.append(kpiTile("СЭД выполняются", ev.executing));
+      if (acc.run !== undefined) stats.append(kpiTile("Прогон", `${acc.run}/${acc.runs}`));
+      if (acc.time !== undefined) stats.append(kpiTile("Модельное время", fmtT(acc.time)));
+      if (acc.events !== undefined) stats.append(kpiTile("НП-событий", acc.events));
+      if (acc.moments !== undefined) stats.append(kpiTile("Моментов переключения", acc.moments));
+      if (acc.waiting !== undefined) stats.append(kpiTile("СЭД ожидают", acc.waiting));
+      if (acc.executing !== undefined) stats.append(kpiTile("СЭД выполняются", acc.executing));
       if (ev.done) {
         status.className = "badge " + (ev.status === "completed" ? "ok" : "err");
         toast("Симуляция завершена: " + ev.status, ev.status === "completed" ? "ok" : "err");
