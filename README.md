@@ -61,6 +61,7 @@ docker build -t dtb . && docker run -p 8000:8000 dtb
 
 ## Документация
 
+- **[docs/USER_GUIDE.md](docs/USER_GUIDE.md) — руководство пользователя: установка, принципы работы, сквозной пример построения модели, справочники**
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — архитектура и bounded contexts
 - [docs/DOMAIN_MODEL.md](docs/DOMAIN_MODEL.md) — доменная модель и 8 видов описания
 - [docs/SIMULATION_ENGINE.md](docs/SIMULATION_ENGINE.md) — движок: цикл МП, семантика СЭД
