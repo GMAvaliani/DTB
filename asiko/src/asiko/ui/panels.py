@@ -382,8 +382,8 @@ class CommandPanel(QWidget):
                                 f"Проект не изменён. Можно повторить или выполнить задание локальным обработчиком.")
             local = self.ctrl.parse_local(text)
             if local.get("kind") != "info":
-                self.result.append("<br><b>Локальный обработчик предлагает:</b>")
-                self.handle_plan(local, append=True)
+                self.result.append("<br><b>Локальный обработчик предлагает (применяется только по подтверждению):</b>")
+                self.handle_plan(local, append=True, auto=False)
 
         run_job(self.window(), "Внешняя модель формирует план…", work, on_done=lambda plan: self.handle_plan(plan),
                 on_error=failed, on_cancel=lambda: self.result.setHtml("Запрос к модели отменён."))
@@ -406,7 +406,7 @@ class CommandPanel(QWidget):
             out.append(f"<i>{html.escape(plan['message'])}</i>")
         return "<br>".join(out)
 
-    def handle_plan(self, plan: dict, append: bool = False):
+    def handle_plan(self, plan: dict, append: bool = False, auto: bool = True):
         """Показывает план и применяет его по правилам: конкретные обратимые команды — сразу
         (с кнопкой отмены), неоднозначные — вопрос, художественные и устаревшие — по подтверждению."""
         self.pending_plan = plan
@@ -440,7 +440,7 @@ class CommandPanel(QWidget):
             self.pending_kind = "stale"
             self._set_buttons(True, False, "Применить к текущему проекту")
             return
-        if res.artistic or kind == "proposal":
+        if res.artistic or kind == "proposal" or not auto:
             setter("<b>Предложение — применяется только по подтверждению.</b><br>" + self._plan_html(plan, res))
             self.pending_kind = "proposal"
             self._set_buttons(True, False, "Применить предложение")

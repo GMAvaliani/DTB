@@ -42,6 +42,9 @@ where = ["src"]
 pythonpath = ["src"]
 testpaths = ["tests"]
 addopts = "-q"
+filterwarnings = [
+    "ignore::DeprecationWarning:sounddevice",
+]
 markers = [
     "slow: долгие тесты",
     "packaged: проверка упакованного приложения (нужна сборка)",

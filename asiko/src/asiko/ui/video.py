@@ -139,7 +139,8 @@ class VideoPanel(QWidget):
             elif abs(pos - vt) > SEEK_TOLERANCE_S:
                 self.player.setPosition(int(vt * 1000))
         else:
-            if is_playing:
+            if self.player.playbackState() != QMediaPlayer.PlaybackState.PausedState:
+                # из состояния «стоп» Qt не показывает кадр после перемотки — переводим в паузу
                 self.player.pause()
             if force or abs(pos - vt) > 0.02:
                 self.player.setPosition(int(vt * 1000))

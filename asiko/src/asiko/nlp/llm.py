@@ -115,8 +115,12 @@ class LlmAdapter:
             return False, "Внешняя модель не настроена — работает локальный обработчик шаблонов."
         if not c.endpoint or not c.model:
             return False, "Не заданы адрес или модель внешнего сервиса."
-        if c.provider == "anthropic" and not self.key():
+        key = self.key()
+        if c.provider == "anthropic" and not key:
             return False, "Не задан API-ключ — работает локальный обработчик шаблонов."
+        if key and (not key.isascii() or any(ch.isspace() or ord(ch) < 32 for ch in key)):
+            return False, ("API-ключ содержит недопустимые символы (пробелы или не латиница) — "
+                           "проверьте, что ключ скопирован полностью и без лишних символов.")
         return True, ""
 
     # ---------------------------------------------------------------- public
