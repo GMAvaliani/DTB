@@ -126,6 +126,7 @@ class PreviewRenderer:
             self.engine.swap_buffer(req.name, buf)
         self.status[req.name] = 1.0
         info = {"seconds": time.perf_counter() - t0, "chunks": len(todo), "plan": plan,
+                "revision": getattr(req.project, "revision", None),
                 "peak": float(buf.peaks.max()) if buf.peaks.size else 0.0}
         if self.on_done:
             self.on_done(req.name, buf, info)

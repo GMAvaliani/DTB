@@ -338,13 +338,11 @@ class MainWindow(QMainWindow):
             self.st_audio.setText(f"Аудио: {pb.device_name[:28]} · {pb.sr} Гц")
         else:
             self.st_audio.setText("Аудио: нет устройства (без звука)")
-        if not self.ctrl.preview.busy() and "result" in self.ctrl.preview.status:
-            st = self.ctrl.preview.status.get("result", 1.0)
-            if st >= 1.0 and not self.st_render.text().startswith("Предпрослушивание готово"):
-                pk = self.ctrl.master_peak
-                pk_db = 20 * math.log10(pk) if pk > 0 else -120
-                warn = " · ПЕРЕГРУЗКА" if pk >= 1.0 else ""
-                self.st_render.setText(f"Предпрослушивание готово · пик {pk_db:+.1f} дБFS{warn}")
+        if self.ctrl.preview_current("result"):
+            pk = self.ctrl.master_peak
+            pk_db = 20 * math.log10(pk) if pk > 0 else -120
+            warn = " · ПЕРЕГРУЗКА" if pk >= 1.0 else ""
+            self.st_render.setText(f"Предпрослушивание готово · пик {pk_db:+.1f} дБFS{warn}")
         self._update_title()
 
     def _on_preview_progress(self, name, frac):

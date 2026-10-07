@@ -57,7 +57,7 @@ python packaging/build.py
 
 ## CI
 
-`.github/workflows/asiko.yml` — матрица Windows x86_64, macOS arm64, macOS x86_64, Linux x86_64:
+`.github/workflows/asiko.yml` — матрица Windows x86_64, macOS arm64 (Apple Silicon), Linux x86_64:
 установка зафиксированных зависимостей → тесты → сборка → самопроверка собранного приложения
 → артефакты `ASIKO-<ос>` (архив + отчёт самопроверки) на 30 дней. Запускается при изменениях
 в `asiko/` или вручную (workflow_dispatch).

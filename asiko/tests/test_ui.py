@@ -30,7 +30,7 @@ def wait(app, cond, timeout=120.0):
 
 
 def preview_ready(win):
-    return lambda: not win.ctrl.preview.busy() and win.ctrl.preview.status.get("result", 0) >= 1.0
+    return lambda: win.ctrl.preview_current("result")
 
 
 @pytest.fixture

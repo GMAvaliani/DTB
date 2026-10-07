@@ -67,6 +67,7 @@ class Controller(QObject):
         self.peak_env = np.zeros(0, np.float32)
         self.master_peak = 0.0
         self.boundary_report = []
+        self.rendered_revision: dict[str, int | None] = {}
         self.secrets = SecretStore()
         self.llm_config = self._load_llm_config()
         self.use_llm = bool(self.settings.value("use_llm", "false") == "true")
@@ -427,6 +428,11 @@ class Controller(QObject):
     def schedule_preview(self) -> None:
         self._debounce.start()
 
+    def preview_current(self, name: str = "result") -> bool:
+        """Буфер прослушивания отрисован для текущей ревизии проекта."""
+        return (not self._debounce.isActive() and self.rendered_revision.get(name) == self.project.revision
+                and self.preview.status.get(name, 0) >= 1.0)
+
     def _do_preview(self) -> None:
         p = self.project
         self.preview.request(PreviewRequest("result", p))
@@ -487,6 +493,7 @@ class Controller(QObject):
 
     def _preview_finished(self, name: str, payload) -> None:
         buf, info = payload
+        self.rendered_revision[name] = info.get("revision")
         if name == "result":
             n = buf.n
             self.peak_env = peak_envelope(buf.data[:n], self.playback.sr, 0.05)
