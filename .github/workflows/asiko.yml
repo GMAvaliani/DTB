@@ -1,0 +1,62 @@
+name: ASIKO build
+
+on:
+  push:
+    paths: ["asiko/**", ".github/workflows/asiko.yml"]
+  pull_request:
+    paths: ["asiko/**", ".github/workflows/asiko.yml"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows-x86_64, os: windows-latest }
+          - { name: macos-arm64, os: macos-latest }
+          - { name: macos-x86_64, os: macos-15-intel }
+          - { name: linux-x86_64, os: ubuntu-24.04 }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: asiko
+        shell: bash
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+      QT_QPA_PLATFORM: offscreen
+      ASIKO_NO_KEYRING: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: System packages (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libportaudio2 libegl1 libgl1 libxkbcommon0 libxkbcommon-x11-0 libfontconfig1 libdbus-1-3 libxcb-cursor0 ffmpeg
+      - name: Install pinned dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.lock
+          pip install -e . --no-deps
+      - name: Tests
+        run: python -m pytest -q -p no:cacheprovider
+      - name: Build distribution and self-test the packaged app
+        run: python packaging/build.py
+      - name: Upload distribution
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ASIKO-${{ matrix.name }}
+          path: |
+            asiko/dist/ASIKO-*.zip
+            asiko/dist/ASIKO-*.tar.gz
+            asiko/dist/ASIKO-*.dmg
+            asiko/dist/selftest-report.json
+          if-no-files-found: warn
+          retention-days: 30

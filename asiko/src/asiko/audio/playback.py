@@ -22,6 +22,28 @@ XFADE_S = 0.02
 LOOP_DECLICK_S = 0.003
 
 
+def import_sounddevice():
+    """Импорт sounddevice; в упакованной Linux-сборке — с вложенной libportaudio."""
+    import sys
+    from pathlib import Path
+
+    if "sounddevice" not in sys.modules and getattr(sys, "frozen", False) and sys.platform.startswith("linux"):
+        import ctypes.util
+
+        bundled = Path(getattr(sys, "_MEIPASS", "")) / "libportaudio.so.2"
+        if bundled.exists():
+            orig = ctypes.util.find_library
+            ctypes.util.find_library = lambda name: str(bundled) if name == "portaudio" else orig(name)
+            try:
+                import sounddevice
+            finally:
+                ctypes.util.find_library = orig
+            return sounddevice
+    import sounddevice
+
+    return sounddevice
+
+
 class MonitorBuffer:
     """Буфер мастера на шкале проекта, заполняемый фрагментами по мере рендера."""
 
@@ -95,8 +117,7 @@ class PlaybackEngine:
     def open(self, device=None, blocksize: int = 1024) -> str:
         self.close()
         try:
-            import sounddevice as sd
-
+            sd = import_sounddevice()
             self._stream = sd.OutputStream(samplerate=self.sr, channels=2, dtype="float32",
                                            callback=self._callback, device=device, blocksize=blocksize,
                                            latency="high")

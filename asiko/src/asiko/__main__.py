@@ -4,7 +4,20 @@ from __future__ import annotations
 import sys
 
 
+def _setup_streams() -> None:
+    # Оконная сборка (PyInstaller --windowed): stdout/stderr отсутствуют — пишем в журнал.
+    if sys.stdout is None or sys.stderr is None:
+        from . import app_paths
+
+        log = open(app_paths.log_dir() / "asiko.log", "a", encoding="utf-8", buffering=1)
+        if sys.stdout is None:
+            sys.stdout = log
+        if sys.stderr is None:
+            sys.stderr = log
+
+
 def main() -> int:
+    _setup_streams()
     argv = list(sys.argv)
     if "--self-test" in argv:
         from .selftest import main as selftest_main

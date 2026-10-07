@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ.setdefault("ASIKO_NO_KEYRING", "1")
 _HOME = Path(os.environ.get("PYTEST_ASIKO_HOME", "")) if os.environ.get("PYTEST_ASIKO_HOME") else None
 
 

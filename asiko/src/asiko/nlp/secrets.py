@@ -11,9 +11,14 @@ SERVICE = "ASIKO"
 
 class SecretStore:
     def __init__(self):
+        import os
+
         self._memory: dict[str, str] = {}
         self.backend_name = "память (до закрытия программы)"
         self.secure = False
+        self._kr = None
+        if os.environ.get("ASIKO_NO_KEYRING"):   # тесты/CI: не трогать системное хранилище
+            return
         try:
             import keyring
             from keyring.backends import fail

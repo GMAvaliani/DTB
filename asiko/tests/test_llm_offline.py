@@ -149,3 +149,42 @@ def test_key_not_in_project_or_settings(tmp_path, work):
     p = work / "проект.asiko"
     save_project(Project(), p)
     assert "sk-very-secret" not in p.read_text("utf-8")
+
+
+def test_keyring_integration_with_fake_backend(monkeypatch):
+    """Путь через системное хранилище секретов (подменённый backend keyring)."""
+    import keyring
+    from keyring.backend import KeyringBackend
+
+    class FakeKeyring(KeyringBackend):
+        priority = 10
+        name = "Тестовое хранилище"
+
+        def __init__(self):
+            super().__init__()
+            self.data = {}
+
+        def get_password(self, service, username):
+            return self.data.get((service, username))
+
+        def set_password(self, service, username, password):
+            self.data[(service, username)] = password
+
+        def delete_password(self, service, username):
+            self.data.pop((service, username), None)
+
+    fake = FakeKeyring()
+    old = keyring.get_keyring()
+    keyring.set_keyring(fake)
+    monkeypatch.delenv("ASIKO_NO_KEYRING", raising=False)
+    try:
+        sec = SecretStore()
+        assert sec.secure and sec.backend_name == "Тестовое хранилище"
+        acc = sec.account("anthropic", "https://api.anthropic.com/")
+        assert sec.set(acc, "sk-abc") is True
+        assert fake.data[("ASIKO", "anthropic|https://api.anthropic.com")] == "sk-abc"
+        assert SecretStore().get(acc) == "sk-abc"
+        sec.delete(acc)
+        assert sec.get(acc) is None
+    finally:
+        keyring.set_keyring(old)

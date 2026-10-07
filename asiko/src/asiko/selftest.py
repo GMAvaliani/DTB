@@ -69,7 +69,9 @@ def main(out_dir: str | None = None) -> int:
         out = {"numpy": np.__version__, "scipy": scipy.__version__, "libsndfile": sf.__libsndfile_version__,
                "soxr": soxr.__version__, "librosa": librosa.__version__, "PySide6": PySide6.__version__}
         try:
-            import sounddevice as sd
+            from asiko.audio.playback import import_sounddevice
+
+            sd = import_sounddevice()
 
             out["portaudio"] = sd.get_portaudio_version()[1]
             out["output_devices"] = sum(1 for d in sd.query_devices() if d["max_output_channels"] > 0)

@@ -497,7 +497,9 @@ class SettingsDialog(QDialog):
         self.device = QComboBox()
         self.device.addItem("Системное по умолчанию", "default")
         try:
-            import sounddevice as sd
+            from ..audio.playback import import_sounddevice
+
+            sd = import_sounddevice()
 
             for i, d in enumerate(sd.query_devices()):
                 if d.get("max_output_channels", 0) >= 2:

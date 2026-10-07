@@ -32,6 +32,11 @@ def run_gui(argv: list[str]) -> int:
     app.setApplicationVersion(__version__)
     app.setOrganizationName(APP_NAME)
     style.apply(app)
+    from pathlib import Path
+
+    icon = Path(__file__).with_name("icon.png")
+    if icon.exists():
+        app.setWindowIcon(QIcon(str(icon)))
     win = MainWindow()
     win.show()
     args = [a for a in argv[1:] if not a.startswith("-")]
