@@ -6,7 +6,8 @@
   `requirements.lock` (выполнение) и `requirements-dev.lock` (тесты и сборка),
   сгенерированы `uv pip compile pyproject.toml --universal` — с маркерами для Windows/macOS/Linux.
 * Linux: системные пакеты `libportaudio2` (звук), `libegl1 libgl1 libxkbcommon0 libfontconfig1
-  libdbus-1-3 libxcb-cursor0` (Qt); `ffmpeg` нужен только тесту синхронизации видео.
+  libdbus-1-3 libxcb-cursor0` (Qt). Тестовый ролик для проверки видео уже лежит в
+  `tests/fixtures/` (ffmpeg нужен, только чтобы пересоздать его).
 
 ```bash
 cd asiko

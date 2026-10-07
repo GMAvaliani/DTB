@@ -197,9 +197,15 @@ def _make_test_video(path: Path, seconds: int = 6, fps: int = 25) -> bool:
     return True
 
 
+# 6 с, 25 к/с, MPEG-4 Part 2: каждая секунда — свой цвет; создано _make_test_video
+VIDEO_FIXTURE = Path(__file__).parent / "fixtures" / "color_seconds.mp4"
+
+
 def test_video_sync_on_seek(win, qapp, tmp_path):
     vid = tmp_path / "тестовое видео.mp4"
-    if not _make_test_video(vid):
+    if VIDEO_FIXTURE.exists():
+        shutil.copyfile(VIDEO_FIXTURE, vid)
+    elif not _make_test_video(vid):
         pytest.skip("ffmpeg недоступен для создания тестового видео")
     from asiko.commands.schema import op
 

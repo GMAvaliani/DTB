@@ -25,9 +25,9 @@ ASIKO — desktop-приложение для звукорежиссёра. Он
 
 | ОС | Файл | Запуск |
 |---|---|---|
-| Windows 10/11 x64 | `ASIKO-0.1.0-windows-x86_64.zip` | распаковать, запустить `ASIKO\ASIKO.exe` |
+| Windows 10/11 x64 | `ASIKO-0.1.0-windows-x86_64.zip` | распаковать, запустить `ASIKO-0.1.0-windows-x86_64\ASIKO.exe` |
 | macOS 12+ на Apple Silicon (arm64) | `ASIKO-0.1.0-macos-arm64.dmg` | открыть образ, перетащить `ASIKO.app` в «Программы» |
-| Linux x86_64 | `ASIKO-0.1.0-linux-x86_64.tar.gz` | распаковать, запустить `ASIKO/ASIKO` |
+| Linux x86_64 | `ASIKO-0.1.0-linux-x86_64.tar.gz` | распаковать, запустить `ASIKO-0.1.0-linux-x86_64/ASIKO` |
 
 Python, Node.js и терминал не нужны. Mac на Intel эта версия не поддерживает: у llvmlite
 (основа анализатора долей librosa/numba) нет сборок для macOS x86_64. Сборки не подписаны (нет сертификатов):

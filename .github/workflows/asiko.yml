@@ -44,7 +44,7 @@ jobs:
           pip install -r requirements-dev.lock
           pip install -e . --no-deps
       - name: Tests
-        run: python -m pytest -q -p no:cacheprovider
+        run: python -m pytest -q -rs -p no:cacheprovider
       - name: Build distribution and self-test the packaged app
         run: python packaging/build.py
       - name: Upload distribution
