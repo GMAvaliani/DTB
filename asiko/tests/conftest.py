@@ -100,3 +100,26 @@ def qapp():
     app = QApplication.instance() or QApplication(sys.argv[:1])
     style.apply(app)
     yield app
+
+
+@pytest.fixture(autouse=True)
+def no_modal_message_boxes(monkeypatch):
+    """Модальные окна не должны блокировать автотесты: фиксируем вызовы и отвечаем «Нет/OK»."""
+    try:
+        from PySide6.QtWidgets import QMessageBox
+    except ImportError:
+        yield []
+        return
+    calls = []
+
+    def make(kind, answer):
+        def f(*a, **k):
+            calls.append((kind, a[1:3] if len(a) > 2 else a))
+            return answer
+        return staticmethod(f)
+
+    monkeypatch.setattr(QMessageBox, "question", make("question", QMessageBox.StandardButton.No))
+    monkeypatch.setattr(QMessageBox, "warning", make("warning", QMessageBox.StandardButton.Ok))
+    monkeypatch.setattr(QMessageBox, "information", make("information", QMessageBox.StandardButton.Ok))
+    monkeypatch.setattr(QMessageBox, "critical", make("critical", QMessageBox.StandardButton.Ok))
+    yield calls

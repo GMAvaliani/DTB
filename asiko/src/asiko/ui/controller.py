@@ -422,7 +422,7 @@ class Controller(QObject):
         run_job(parent, "Анализ темпа и долей (первый запуск дольше — компиляция анализатора)…", work,
                 on_done=done, on_error=lambda m: (self.message.emit("error", f"Анализ не удался: {m}"),
                                                   on_done(False) if on_done else None),
-                on_cancel=lambda: (self.message.emit("info", "Анализ отменён."), on_done(False) if on_done else None))
+                on_cancel=lambda: (self.message.emit("info", "Анализ отменён."), on_done(None) if on_done else None))
 
     # ---------------------------------------------------------------- preview & playback
     def schedule_preview(self) -> None:

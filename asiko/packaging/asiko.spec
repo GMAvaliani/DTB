@@ -54,7 +54,7 @@ a = Analysis(
     noarchive=False,
 )
 pyz = PYZ(a.pure)
-icon = str(ROOT / "packaging" / ("icon.ico" if sys.platform == "win32" else "icon.png"))
+icon = str(ROOT / "packaging" / {"win32": "icon.ico", "darwin": "icon.icns"}.get(sys.platform, "icon.png"))
 exe = EXE(
     pyz,
     a.scripts,

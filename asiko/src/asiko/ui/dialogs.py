@@ -263,6 +263,11 @@ class MusicWizard(QDialog):
         self.accept()
 
         def after(ok):
+            if ok is None:      # анализ отменён пользователем — переход не создаём
+                return
+            if ok is False:
+                self.win.show_message("warn", "Анализ долей не выполнен — переход создаётся по времени, "
+                                              "без разметки долей.")
             r = self.ctrl.ui_ops(ops, text="Сценарий «Переход A → B»")
             if r.ok:
                 self.win.show_message("info", " ".join(r.summary))
@@ -583,8 +588,8 @@ class SettingsDialog(QDialog):
         cfg = self._config()
         stored = self.ctrl.save_llm_config(cfg, self.key.text().strip() or None)
         if stored is False:
-            QMessageBox.warning(self, "Ключ", "Системное хранилище секретов недоступно: ключ будет храниться только "
-                                              "до закрытия программы.")
+            self.win.show_message("warn", "Системное хранилище секретов недоступно: ключ будет храниться только "
+                                          "до закрытия программы.")
         s = self.ctrl.settings
         dev = self.device.currentData()
         changed = str(s.value("audio_device", "default")) != dev

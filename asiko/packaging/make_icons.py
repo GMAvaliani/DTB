@@ -64,6 +64,12 @@ def main() -> None:
         entries += struct.pack("<BBBBHHII", s % 256, s % 256, 0, 0, 1, 32, len(data), offset)
         offset += len(data)
     (HERE / "icon.ico").write_bytes(header + entries + b"".join(imgs))
+    # ICNS (macOS): элементы с PNG-данными ic07…ic10 (128, 256, 512, 1024)
+    body = b""
+    for tag, s in ((b"ic07", 128), (b"ic08", 256), (b"ic09", 512), (b"ic10", 1024)):
+        data = png_bytes(draw(s))
+        body += tag + struct.pack(">I", len(data) + 8) + data
+    (HERE / "icon.icns").write_bytes(b"icns" + struct.pack(">I", len(body) + 8) + body)
     print("icons written")
 
 

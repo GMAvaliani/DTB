@@ -145,7 +145,7 @@ cd asiko
 python -m venv .venv && . .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements-dev.lock && pip install -e . --no-deps
 python -m asiko                                    # запуск
-python -m pytest                                   # 113 автотестов (≈3 мин)
+python -m pytest                                   # 120 автотестов (≈4 мин)
 python -m asiko --self-test                        # самопроверка на реальных файлах
 python packaging/build.py                          # дистрибутив + самопроверка собранного приложения
 ```
