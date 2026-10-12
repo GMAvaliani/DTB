@@ -279,3 +279,32 @@ def test_csv_thresholds_compact_syntax(small_model):
     )
     assert report.ok, report.errors
     assert small_model.policies["p1"].thresholds == {"queue": 4.0, "load": 0.9}
+
+
+def test_excel_roundtrip_stub_sheets(small_model):
+    """ТЗ 0.3: заготовки переносятся через Excel, оставаясь нереализованными."""
+    from dtb.domain.links import GapType, Link
+
+    small_model.links["l1"] = Link(
+        id="l1", name="Производство → продажа", source_sed_id="production",
+        target_sed_id="sale", utility_type_id="product",
+        health_criterion="stock('product') > 0", delay=4.0,
+        reaction_horizon=12.0, critical_moment=240.0,
+    )
+    small_model.gap_types["g_flow"] = GapType(
+        id="g_flow", name="Разрыв прямого потока", broken_object="forward_flow",
+        localization_check="нет передачи в срок", decision_class="регулирование",
+        closure_mode="regulatory",
+    )
+    target = EnterpriseModel(enterprise=Enterprise(id="copy", name="Copy"))
+    report = import_workbook(target, export_workbook(small_model))
+    assert report.ok, report.errors
+    link = target.links["l1"]
+    assert link.source_sed_id == "production" and link.target_sed_id == "sale"
+    assert link.delay == 4.0 and link.reaction_horizon == 12.0
+    assert link.critical_moment == 240.0
+    assert link.implemented is False
+    gap = target.gap_types["g_flow"]
+    assert gap.broken_object == "forward_flow" and gap.closure_mode == "regulatory"
+    # заготовки не делают модель нерасчётной
+    assert validate_model(target).ok_to_simulate

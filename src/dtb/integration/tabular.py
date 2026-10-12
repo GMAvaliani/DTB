@@ -53,6 +53,7 @@ from dtb.domain import (
     UtilityType,
 )
 from dtb.domain.calendars import WEEKDAY_NAMES, Calendar, CalendarException, Shift
+from dtb.domain.links import GapType, Link
 from dtb.domain.resources import QueueDiscipline
 from dtb.domain.seds import InterruptionMode
 from dtb.domain.economics import (
@@ -103,6 +104,8 @@ SHEETS = [
     "calendars",  # режимы работы: смены, выходные, остановки
     "economic_items",  # экономика: статьи начисления
     "economics",  # экономика: настройки прогона (валюта, дисконт, разогрев)
+    "links",  # ЗАГОТОВКА: связь как объект (движком не используется)
+    "gap_types",  # ЗАГОТОВКА: типология разрывов (движком не используется)
 ]
 
 
@@ -801,6 +804,42 @@ def _apply_economic_item(model: EnterpriseModel, row: dict[str, Any]) -> tuple[s
     return iid, is_new
 
 
+def _apply_link(model: EnterpriseModel, row: dict[str, Any]) -> tuple[str, bool]:
+    """ЗАГОТОВКА: связь сохраняется и версионируется, расчётом не используется."""
+    lid = _s(row.get("id"))
+    is_new = lid not in model.links
+    model.links[lid] = Link(
+        id=lid,
+        name=_s(row.get("name")),
+        description=_s(row.get("description")),
+        source_sed_id=_s(row.get("source_sed_id")),
+        target_sed_id=_s(row.get("target_sed_id")),
+        utility_type_id=_s(row.get("utility_type_id")) or None,
+        health_criterion=_s(row.get("health_criterion")) or None,
+        delay=_f(row.get("delay")),
+        reaction_horizon=_f(row.get("reaction_horizon")),
+        critical_moment=_f(row.get("critical_moment")),
+        responsible_subject_ref=_s(row.get("responsible_subject_ref")) or None,
+    )
+    return lid, is_new
+
+
+def _apply_gap_type(model: EnterpriseModel, row: dict[str, Any]) -> tuple[str, bool]:
+    """ЗАГОТОВКА: справочник типов разрывов без логики локализации."""
+    gid = _s(row.get("id"))
+    is_new = gid not in model.gap_types
+    model.gap_types[gid] = GapType(
+        id=gid,
+        name=_s(row.get("name")),
+        description=_s(row.get("description")),
+        broken_object=_s(row.get("broken_object")),
+        localization_check=_s(row.get("localization_check")) or None,
+        decision_class=_s(row.get("decision_class")),
+        closure_mode=_s(row.get("closure_mode")),
+    )
+    return gid, is_new
+
+
 def _apply_economics(model: EnterpriseModel, row: dict[str, Any]) -> tuple[str, bool]:
     """Лист настроек экономики: одна строка на модель."""
     model.economics = EconomicsSettings(
@@ -849,6 +888,8 @@ _APPLIERS: dict[str, Callable[[EnterpriseModel, dict[str, Any]], tuple[str, bool
     "calendars": _apply_calendar,
     "economic_items": _apply_economic_item,
     "economics": _apply_economics,
+    "links": _apply_link,
+    "gap_types": _apply_gap_type,
 }
 
 _TYPE_NAME = {
@@ -874,6 +915,8 @@ _TYPE_NAME = {
     "calendars": "calendar",
     "economic_items": "economic_item",
     "economics": "economics_settings",
+    "links": "link",
+    "gap_types": "gap_type",
 }
 
 
@@ -1064,6 +1107,27 @@ def model_to_rows(model: EnterpriseModel, sheet: str) -> tuple[list[str], list[l
                   "include_control_costs", "control_article"]
         rows = [[e.currency, e.discount_rate_annual, e.hours_per_year, e.warmup_hours,
                  int(e.include_control_costs), e.control_article]]
+    elif sheet == "links":
+        header = ["id", "name", "description", "source_sed_id", "target_sed_id",
+                  "utility_type_id", "health_criterion", "delay", "reaction_horizon",
+                  "critical_moment", "responsible_subject_ref", "implemented"]
+        rows = [
+            [x.id, x.name, x.description, x.source_sed_id, x.target_sed_id,
+             x.utility_type_id or "", x.health_criterion or "",
+             x.delay if x.delay is not None else "",
+             x.reaction_horizon if x.reaction_horizon is not None else "",
+             x.critical_moment if x.critical_moment is not None else "",
+             x.responsible_subject_ref or "", int(x.implemented)]
+            for x in model.links.values()
+        ]
+    elif sheet == "gap_types":
+        header = ["id", "name", "description", "broken_object", "localization_check",
+                  "decision_class", "closure_mode"]
+        rows = [
+            [x.id, x.name, x.description, x.broken_object, x.localization_check or "",
+             x.decision_class, x.closure_mode]
+            for x in model.gap_types.values()
+        ]
     else:
         raise KeyError(f"unknown sheet {sheet!r}")
     return header, rows

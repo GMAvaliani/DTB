@@ -401,3 +401,50 @@ def test_lookahead_endpoint(client):
     entry = body["lookahead_log"][0]
     assert entry["horizon"] == 48.0
     assert any(score["action"] is None for score in entry["scores"])
+
+
+def test_stub_entities_through_api(client):
+    """ТЗ 0.3: заготовки доступны в API как обычные сущности и не влияют на расчёт."""
+    client.post("/api/demo")
+    r = client.post("/api/enterprises/demo_plant/entities/link", json={
+        "id": "l_prod_qc", "name": "Производство → ОТК",
+        "source_sed_id": "production", "target_sed_id": "quality_control",
+        "utility_type_id": "finished_product", "delay": 2.0,
+        "reaction_horizon": 8.0, "health_criterion": "stock('finished_product') > 0",
+    })
+    assert r.status_code == 200 and r.json()["created"]
+    assert client.post("/api/enterprises/demo_plant/entities/gap_type", json={
+        "id": "g_flow", "name": "Разрыв прямого потока",
+        "broken_object": "forward_flow", "decision_class": "регулирование",
+        "closure_mode": "regulatory",
+    }).status_code == 200
+
+    listed = client.get("/api/enterprises/demo_plant/entities/link").json()
+    assert [x["id"] for x in listed] == ["l_prod_qc"]
+    assert client.get(
+        "/api/enterprises/demo_plant/entities/link/l_prod_qc"
+    ).json()["implemented"] is False
+
+    # валидация сообщает, что это заготовки, и не блокирует расчёт
+    validation = client.get("/api/enterprises/demo_plant/validation").json()
+    assert validation["ok_to_simulate"] is True
+    assert any(
+        i["code"] == "not_implemented" and i["entity_type"] == "link"
+        for i in validation["issues"]
+    )
+
+    sim_id = client.post("/api/simulations", json={
+        "scenario_id": "demo_baseline", "kind": "single", "seed": 20250819,
+    }).json()["id"]
+    assert wait_done(client, sim_id) == "completed"
+    with_stub = client.get(f"/api/simulations/{sim_id}/state").json()["final_kpis"]
+
+    assert client.delete(
+        "/api/enterprises/demo_plant/entities/link/l_prod_qc"
+    ).json()["deleted"] == "l_prod_qc"
+    sim_id2 = client.post("/api/simulations", json={
+        "scenario_id": "demo_baseline", "kind": "single", "seed": 20250819,
+    }).json()["id"]
+    assert wait_done(client, sim_id2) == "completed"
+    without_stub = client.get(f"/api/simulations/{sim_id2}/state").json()["final_kpis"]
+    assert with_stub == without_stub  # заготовка расчёт не изменила

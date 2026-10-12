@@ -27,7 +27,7 @@ from dtb.domain.enterprise import Enterprise
 from dtb.domain.events import EventKind
 from dtb.domain.goals import Goal
 from dtb.domain.kpi import KPIDefinition
-from dtb.domain.links import Gap, GapType, Link
+from dtb.domain.links import Feedback, Gap, GapType, Link, TransferRegistry
 from dtb.domain.resources import (
     Employee,
     Equipment,
@@ -109,7 +109,7 @@ _COLLECTION_FIELD = {
 
 #: Версия схемы модели. Увеличивается при добавлении коллекций и полей,
 #: требующих миграции сохранённых снимков (см. migrate_snapshot).
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 class EnterpriseModel(BaseModel):
@@ -143,6 +143,9 @@ class EnterpriseModel(BaseModel):
     links: dict[str, Link] = Field(default_factory=dict)
     gap_types: dict[str, GapType] = Field(default_factory=dict)
     gaps: list[Gap] = Field(default_factory=list)
+    #: обратные потоки F← и реестр передач: места под данные, движком не ведутся
+    feedbacks: list[Feedback] = Field(default_factory=list)
+    transfers: list[TransferRegistry] = Field(default_factory=list)
     initial_state: InitialState = Field(default_factory=InitialState)
     # View 3/7 series per KPI id: план и факт; forecast comes from simulation.
     plans: dict[str, list[SeriesPoint]] = Field(default_factory=dict)
@@ -241,6 +244,12 @@ def migrate_snapshot(data: dict[str, Any]) -> dict[str, Any]:
         data = dict(data)
         data.setdefault("calendars", {})
         data["schema_version"] = 4
+    if version < 5:
+        # v4 → v5: заведены места под обратные потоки и реестр передач
+        data = dict(data)
+        data.setdefault("feedbacks", [])
+        data.setdefault("transfers", [])
+        data["schema_version"] = 5
     return data
 
 

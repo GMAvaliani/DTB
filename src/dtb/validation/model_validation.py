@@ -218,6 +218,9 @@ def validate_model(model: EnterpriseModel) -> ValidationReport:
     # --- режимы работы: календари и дисциплины очередей -------------------------
     _validate_calendars(r, model)
 
+    # --- заготовки ниши (не влияют на расчёт) -----------------------------------
+    _validate_stubs(r, model)
+
     # --- экономика --------------------------------------------------------------
     _validate_economics(r, model)
 
@@ -441,6 +444,44 @@ def _validate_calendars(r: ValidationReport, model: EnterpriseModel) -> None:
         if sed.interruption_mode == InterruptionMode.RESTART and not sed.resources:
             r.add(Severity.INFO, "restart_without_resources", "sed", sed.id,
                   "режим restart осмыслен для СЭД, зависящих от ресурсов")
+
+
+def _validate_stubs(r: ValidationReport, model: EnterpriseModel) -> None:
+    """Заготовки ниши: ссылки проверяем, но прямо говорим, что расчёта нет.
+
+    Эти сущности хранятся, версионируются и переживают выгрузку-загрузку, но
+    движок их не читает. Пользователь должен узнать об этом из валидации, а не
+    из удивления, что описанная связь ни на что не влияет.
+    """
+    for link in model.links.values():
+        for field_name, sed_id in (
+            ("source_sed_id", link.source_sed_id),
+            ("target_sed_id", link.target_sed_id),
+        ):
+            if sed_id and sed_id not in model.seds:
+                r.add(Severity.WARNING, "broken_ref", "link", link.id,
+                      f"{field_name}: СЭД {sed_id!r} не существует")
+        if link.utility_type_id and link.utility_type_id not in model.utility_types:
+            r.add(Severity.WARNING, "broken_ref", "link", link.id,
+                  f"полезность {link.utility_type_id!r} не существует")
+        if link.responsible_subject_ref and (
+            link.responsible_subject_ref not in model.subjects
+        ):
+            r.add(Severity.WARNING, "broken_ref", "link", link.id,
+                  f"субъект {link.responsible_subject_ref!r} не существует")
+    if model.links:
+        r.add(Severity.INFO, "not_implemented", "link", f"{len(model.links)}",
+              "связи хранятся и версионируются, но движком не используются: "
+              "критерий исправности, запаздывание и ответственный субъект — "
+              "заготовка под отдельное исследование")
+    if model.gap_types:
+        r.add(Severity.INFO, "not_implemented", "gap_type", f"{len(model.gap_types)}",
+              "типология разрывов заведена как справочник: локализация, мера "
+              "тяжести, критический момент и горизонт реакции не реализованы")
+    if model.gaps or model.feedbacks or model.transfers:
+        r.add(Severity.INFO, "not_implemented", "model", "stub_records",
+              "обратные потоки, реестр передач и обнаруженные разрывы хранятся "
+              "как данные; движок их не порождает и не читает")
 
 
 def _validate_economics(r: ValidationReport, model: EnterpriseModel) -> None:

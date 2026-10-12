@@ -49,6 +49,9 @@ _ALIASES = {
     "экономика": "economic_items",
     "статьи": "economic_items",
     "настройки экономики": "economics",
+    "связи деятельности": "links",
+    "разрывы": "gap_types",
+    "типы разрывов": "gap_types",
 }
 
 
