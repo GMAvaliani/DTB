@@ -266,3 +266,49 @@ def test_rejected_actions_endpoint(client):
     assert costs["total"] > 0
     assert "overtime_shift" not in costs["by_action"]  # отклонённое не стоит ничего
     assert set(costs["by_loop"]) <= {"regulation", "organization", "development"}
+
+
+def test_economics_endpoint_and_paired_comparison(client):
+    """Фаза 3: экономика прогона и парные разности в сравнении."""
+    client.post("/api/demo")
+    ids = []
+    for scenario, runs in (("demo_baseline", 4), ("demo_extra_line", 4)):
+        sim_id = client.post("/api/simulations", json={
+            "scenario_id": scenario, "kind": "monte_carlo", "runs": runs,
+            "seed": 4242,
+        }).json()["id"]
+        assert wait_done(client, sim_id) == "completed"
+        ids.append(sim_id)
+
+    econ = client.get(f"/api/simulations/{ids[0]}/economics").json()["economics"]
+    assert econ["currency"] == "руб"
+    assert econ["discount_rate_annual"] == 0.15
+    assert econ["npv"] != 0.0
+    assert "выручка" in econ["by_article"]
+    assert set(econ["by_kind"]) <= {"rate", "one_time", "terminal"}
+    assert econ["entries"] > 0
+
+    cmp = client.get(f"/api/simulations/compare?ids={ids[0]},{ids[1]}").json()
+    paired = cmp["paired_differences"]["revenue"][0]
+    assert paired["n_pairs"] == 4 and paired["paired_by_seed"] is True
+    assert paired["ci_low"] <= paired["mean"] <= paired["ci_high"]
+    assert cmp["paired_npv"] and cmp["paired_npv"][0]["n_pairs"] == 4
+    assert cmp["confidence_level"] == 0.95
+    assert len(cmp["economics"]) == 2
+
+
+def test_warmup_scenario_measures_steady_state(client):
+    client.post("/api/demo")
+    sims = {}
+    for scenario in ("demo_baseline", "demo_steady_state"):
+        sim_id = client.post("/api/simulations", json={
+            "scenario_id": scenario, "kind": "single", "seed": 20250819,
+        }).json()["id"]
+        assert wait_done(client, sim_id) == "completed"
+        sims[scenario] = client.get(f"/api/simulations/{sim_id}/economics").json()
+    assert sims["demo_baseline"]["warmup"]["applied"] is False
+    steady = sims["demo_steady_state"]
+    assert steady["warmup"]["applied"] is True
+    assert steady["warmup"]["hours"] == 168.0
+    assert steady["economics"]["measured_from"] == 168.0
+    assert steady["economics"]["warmup_excluded"]["income"] > 0

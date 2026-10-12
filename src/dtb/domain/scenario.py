@@ -84,6 +84,12 @@ class Scenario(EntityBase):
     #: Пусто — используется режим, заданный у каждого наблюдения.
     observation_mode: str | None = None
 
+    #: Период разогрева прогона в часах: статистика и экономика измеряются
+    #: после него. Пусто — берётся значение из настроек экономики модели.
+    warmup_hours: float | None = Field(default=None, ge=0)
+    #: Годовая ставка дисконтирования для этого прогона; пусто — из модели.
+    discount_rate_annual: float | None = Field(default=None, ge=0)
+
     objective: ObjectiveSpec | None = None
     constraints: list[str] = Field(default_factory=list)
     version: int = Field(default=1, ge=1)

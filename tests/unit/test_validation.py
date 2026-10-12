@@ -245,3 +245,46 @@ def test_scenario_subject_must_exist(small_model):
         ],
     )
     assert not validate_scenario(small_model, scenario).ok_to_simulate
+
+
+# ------------------------------------------------- экономика (фаза 3) --
+
+
+def test_economic_item_broken_ref_is_critical(small_model):
+    from dtb.domain.economics import EconomicBasis, EconomicItem
+
+    small_model.economic_items["bad"] = EconomicItem(
+        id="bad", name="bad", basis=EconomicBasis.RESOURCE_CAPACITY, ref="ghost", rate=1.0
+    )
+    assert not validate_model(small_model).ok_to_simulate
+
+
+def test_warmup_longer_than_horizon_is_critical(small_model):
+    small_model.economics.warmup_hours = small_model.enterprise.planning_horizon_hours
+    assert not validate_model(small_model).ok_to_simulate
+
+
+def test_long_warmup_is_warning(small_model):
+    small_model.economics.warmup_hours = (
+        small_model.enterprise.planning_horizon_hours * 0.75
+    )
+    report = validate_model(small_model)
+    assert report.ok_to_simulate
+    assert any(i.code == "warmup_long" for i in report.issues)
+
+
+def test_economics_without_income_is_warning(small_model):
+    from dtb.domain.economics import EconomicBasis, EconomicItem
+
+    small_model.economic_items["rent"] = EconomicItem(
+        id="rent", name="Аренда", basis=EconomicBasis.RESOURCE_CAPACITY,
+        ref="line", rate=10.0,
+    )
+    report = validate_model(small_model)
+    assert any(i.code == "no_income_items" for i in report.issues)
+    assert report.ok_to_simulate
+
+
+def test_scenario_warmup_validated(small_model):
+    bad = Scenario(id="s", name="s", enterprise_id="acme", warmup_hours=10_000.0)
+    assert not validate_scenario(small_model, bad).ok_to_simulate

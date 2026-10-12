@@ -49,6 +49,12 @@ class MonteCarloResult:
     goal_achievement_probability: dict[str, float] = field(default_factory=dict)
     goal_metric_details: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     run_digests: list[str] = field(default_factory=list)
+    #: сиды прогонов — ключ сопряжения для парных разностей (общие случайные числа)
+    run_seeds: list[int] = field(default_factory=list)
+    #: итоговые значения KPI по прогонам, в порядке run_seeds
+    run_finals: dict[str, list[float]] = field(default_factory=dict)
+    #: NPV по прогонам (пусто, если экономика не задана)
+    run_npv: list[float] = field(default_factory=list)
     failed_runs: int = 0
     sample_result: dict[str, Any] | None = None  # one full run for drill-down
 
@@ -63,6 +69,9 @@ class MonteCarloResult:
             "goal_achievement_probability": self.goal_achievement_probability,
             "goal_metric_details": self.goal_metric_details,
             "run_digests": self.run_digests,
+            "run_seeds": self.run_seeds,
+            "run_finals": self.run_finals,
+            "run_npv": self.run_npv,
             "failed_runs": self.failed_runs,
             "sample_result": self.sample_result,
         }
@@ -83,8 +92,11 @@ def wrap_single(result: SimulationResult, grid_points: int = 60) -> MonteCarloRe
         provenance=result.provenance.to_dict(),
         grid=grid,
         run_digests=[result.content_digest()],
+        run_seeds=[result.provenance.seed],
+        run_npv=[result.economics.get("npv", 0.0)] if result.economics else [],
         sample_result=result.to_dict(),
     )
+    mc.run_finals = {kid: [value] for kid, value in result.final_kpis.items()}
     for kid, series in result.kpi_series.items():
         values = [_step_value(series, t) for t in grid]
         rounded = [round(v, 6) for v in values]
@@ -132,6 +144,7 @@ def run_monte_carlo(
     grid = [round(horizon * i / grid_points, 6) for i in range(grid_points + 1)]
 
     results: list[SimulationResult] = []
+    run_seeds: list[int] = []
     failed = 0
     for i in range(n_runs):
         if control is not None and not control.checkpoint():
@@ -163,6 +176,7 @@ def run_monte_carlo(
                 raise RuntimeError(f"all Monte Carlo runs failed: {result.error}")
         else:
             results.append(result)
+            run_seeds.append(run_seed)
         if progress_cb:
             progress_cb({
                 "phase": "monte_carlo",
@@ -178,6 +192,8 @@ def run_monte_carlo(
         grid=grid,
         failed_runs=failed,
         run_digests=[r.content_digest() for r in results],
+        run_seeds=run_seeds,
+        run_npv=[r.economics.get("npv", 0.0) for r in results if r.economics],
         sample_result=results[0].to_dict() if results else None,
     )
     if not results:
@@ -206,6 +222,7 @@ def run_monte_carlo(
             stats["ci_low"].append(round(mean - z95 * sem, 6))
             stats["ci_high"].append(round(mean + z95 * sem, 6))
         mc.kpi_stats[kid] = stats
+        mc.run_finals[kid] = [round(r.final_kpis.get(kid, 0.0), 6) for r in results]
         finals = sorted(r.final_kpis.get(kid, 0.0) for r in results)
         n = len(finals)
         mean = sum(finals) / n

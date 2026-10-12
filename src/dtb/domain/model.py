@@ -14,6 +14,7 @@ from typing import Any, Iterator
 from pydantic import BaseModel, ConfigDict, Field
 
 from dtb.domain.base import EntityBase
+from dtb.domain.economics import EconomicItem, EconomicsSettings
 from dtb.domain.control import (
     ControlActionDef,
     DecisionPoint,
@@ -75,6 +76,8 @@ ENTITY_COLLECTIONS: dict[str, type[EntityBase]] = {
     "policy": Policy,
     "decision_point": DecisionPoint,
     "observation": Observation,
+    # экономика деятельности
+    "economic_item": EconomicItem,
     # заготовки ниши (NOT IMPLEMENTED, см. dtb.domain.links)
     "link": Link,
     "gap_type": GapType,
@@ -96,13 +99,14 @@ _COLLECTION_FIELD = {
     "policy": "policies",
     "decision_point": "decision_points",
     "observation": "observations",
+    "economic_item": "economic_items",
     "link": "links",
     "gap_type": "gap_types",
 }
 
 #: Версия схемы модели. Увеличивается при добавлении коллекций и полей,
 #: требующих миграции сохранённых снимков (см. migrate_snapshot).
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class EnterpriseModel(BaseModel):
@@ -127,6 +131,9 @@ class EnterpriseModel(BaseModel):
     policies: dict[str, Policy] = Field(default_factory=dict)
     decision_points: dict[str, DecisionPoint] = Field(default_factory=dict)
     observations: dict[str, Observation] = Field(default_factory=dict)
+    # экономика деятельности (ставки, разовые начисления, остаточная стоимость)
+    economic_items: dict[str, EconomicItem] = Field(default_factory=dict)
+    economics: EconomicsSettings = Field(default_factory=EconomicsSettings)
     # заготовки ниши: хранятся и версионируются, на расчёт не влияют
     links: dict[str, Link] = Field(default_factory=dict)
     gap_types: dict[str, GapType] = Field(default_factory=dict)
@@ -206,6 +213,12 @@ def migrate_snapshot(data: dict[str, Any]) -> dict[str, Any]:
             data.setdefault(field, {})
         data.setdefault("gaps", [])
         data["schema_version"] = 2
+    if version < 3:
+        # v2 → v3: добавлены статьи экономики и настройки прогона
+        data = dict(data)
+        data.setdefault("economic_items", {})
+        data.setdefault("economics", {})
+        data["schema_version"] = 3
     return data
 
 

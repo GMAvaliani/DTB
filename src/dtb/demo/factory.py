@@ -44,6 +44,13 @@ from dtb.domain import (
     UtilityKind,
     UtilityType,
 )
+from dtb.domain.economics import (
+    EconomicBasis,
+    EconomicDirection,
+    EconomicItem,
+    EconomicKind,
+    EconomicsSettings,
+)
 from dtb.domain.control import (
     ControlActionDef,
     ControlLoop,
@@ -366,9 +373,114 @@ def build_demo_model() -> EnterpriseModel:
     # -- контур управления: субъекты, действия, политики, МР, наблюдения ---------
     _add_control_loop(m)
 
+    # -- экономика деятельности: ставки, разовые начисления, остаток -------------
+    _add_economics(m)
+
     # -- ERP micro-level (views 4–7) through the real connector pipeline ----------
     sync_connector(m, MockERPConnector())
     return m
+
+
+def _add_economics(m: EnterpriseModel) -> None:
+    """Экономика «Демо-Завода»: ставки, разовые начисления, остаточная стоимость.
+
+    Ставки заданы явно, в масштабе демо-бизнеса (25 000 ₽ за доставленный
+    заказ), а не выведены из ``cost_per_hour``: справочная стоимость ресурса и
+    экономика прогона — разные вещи. Доход берётся из того же денежного
+    потока, который считает модель (полезность ``money``), поэтому экономика и
+    KPI «Выручка» согласованы по построению.
+
+    Дисконт — 15% годовых непрерывно. Разогрев в базовом прогоне не задан:
+    план и факт сравниваются по всему горизонту. Сценарий
+    ``demo_steady_state`` отбрасывает первую неделю как переходный режим.
+    """
+    m.economics = EconomicsSettings(
+        currency="руб",
+        discount_rate_annual=0.15,
+        warmup_hours=0.0,  # базовый прогон считает весь горизонт целиком
+        include_control_costs=True,
+    )
+    # постоянная часть: платится за ёмкость, независимо от загрузки
+    for rid, rate, name in [
+        ("production_line", 200.0, "Содержание сборочных линий"),
+        ("qc_station", 60.0, "Содержание поста ОТК"),
+        ("delivery_trucks", 80.0, "Содержание автопарка"),
+    ]:
+        m.economic_items[f"hold_{rid}"] = EconomicItem(
+            id=f"hold_{rid}", name=name, article="амортизация и содержание",
+            description="Ставка за единицу ёмкости в час",
+            kind=EconomicKind.RATE, basis=EconomicBasis.RESOURCE_CAPACITY, ref=rid,
+            rate=rate,
+        )
+    # переменная часть: платится за занятые единицы ресурса
+    for rid, rate, name in [
+        ("production_line", 300.0, "Сборка: переменные расходы"),
+        ("qc_station", 100.0, "ОТК: переменные расходы"),
+        ("delivery_trucks", 150.0, "Доставка: топливо и пробег"),
+    ]:
+        m.economic_items[f"busy_{rid}"] = EconomicItem(
+            id=f"busy_{rid}", name=name, article="переменные расходы",
+            kind=EconomicKind.RATE, basis=EconomicBasis.RESOURCE_BUSY, ref=rid,
+            rate=rate,
+        )
+    for rid, rate in [
+        ("sales_team", 180.0), ("planners", 150.0),
+        ("warehouse_team", 120.0), ("trainers", 100.0),
+    ]:
+        m.economic_items[f"payroll_{rid}"] = EconomicItem(
+            id=f"payroll_{rid}", name=f"ФОТ: {m.resources[rid].name}",
+            article="фонд оплаты труда",
+            kind=EconomicKind.RATE, basis=EconomicBasis.RESOURCE_CAPACITY, ref=rid,
+            rate=rate,
+        )
+    m.economic_items["revenue_money"] = EconomicItem(
+        id="revenue_money", name="Поступление оплаты", article="выручка",
+        description="Тот же денежный поток, который считает KPI «Выручка»",
+        direction=EconomicDirection.INCOME, kind=EconomicKind.ONE_TIME,
+        basis=EconomicBasis.UTILITY_PRODUCED, ref="money", rate=1.0,
+    )
+    m.economic_items["material_cost"] = EconomicItem(
+        id="material_cost", name="Сырьё в производстве", article="материалы",
+        kind=EconomicKind.ONE_TIME, basis=EconomicBasis.UTILITY_CONSUMED,
+        ref="raw_material", rate=30.0,
+    )
+    m.economic_items["component_cost"] = EconomicItem(
+        id="component_cost", name="Комплектующие", article="материалы",
+        kind=EconomicKind.ONE_TIME, basis=EconomicBasis.UTILITY_CONSUMED,
+        ref="components", rate=100.0,
+    )
+    m.economic_items["defect_loss"] = EconomicItem(
+        id="defect_loss", name="Потери от дефектов", article="потери качества",
+        kind=EconomicKind.ONE_TIME, basis=EconomicBasis.UTILITY_PRODUCED,
+        ref="defect_product", rate=2_000.0,
+    )
+    m.economic_items["storage"] = EconomicItem(
+        id="storage", name="Хранение готовой продукции", article="логистика",
+        description="Плата за единицу запаса в час",
+        kind=EconomicKind.RATE, basis=EconomicBasis.UTILITY_STOCK,
+        ref="stored_product", rate=5.0,
+    )
+    m.economic_items["wip_cost"] = EconomicItem(
+        id="wip_cost", name="Капитал, связанный в НЗП", article="оборотный капитал",
+        kind=EconomicKind.RATE, basis=EconomicBasis.WIP, rate=25.0,
+    )
+    m.economic_items["queue_penalty"] = EconomicItem(
+        id="queue_penalty", name="Цена ожидания заказа перед сборкой",
+        article="уровень сервиса",
+        kind=EconomicKind.RATE, basis=EconomicBasis.QUEUE, ref="production", rate=60.0,
+    )
+    m.economic_items["terminal_stock"] = EconomicItem(
+        id="terminal_stock", name="Остаток готовой продукции на складе",
+        article="остаточная стоимость", direction=EconomicDirection.INCOME,
+        kind=EconomicKind.TERMINAL, basis=EconomicBasis.UTILITY_STOCK,
+        ref="stored_product", rate=20_000.0,
+    )
+    m.economic_items["terminal_capacity"] = EconomicItem(
+        id="terminal_capacity", name="Остаточная стоимость сборочных линий",
+        article="остаточная стоимость", direction=EconomicDirection.INCOME,
+        kind=EconomicKind.TERMINAL, basis=EconomicBasis.RESOURCE_CAPACITY,
+        ref="production_line", rate=150_000.0,
+    )
 
 
 def _add_control_loop(m: EnterpriseModel) -> None:
@@ -403,7 +515,7 @@ def _add_control_loop(m: EnterpriseModel) -> None:
             kind=EffectKind.RESOURCE_CAPACITY_DELTA,
             resource_id="production_line", delta=1, duration=24,
         ),
-        one_time_cost=45_000, term=24, min_authority_level=1,
+        one_time_cost=15_000, term=24, min_authority_level=1,
         subject_ref="shift_supervisor",
     )
     m.control_actions["second_shift_crew"] = ControlActionDef(
@@ -415,7 +527,7 @@ def _add_control_loop(m: EnterpriseModel) -> None:
             kind=EffectKind.RESOURCE_CAPACITY_DELTA,
             resource_id="production_line", delta=1, duration=336,
         ),
-        activation_delay=48, one_time_cost=120_000, recurring_cost=900,
+        activation_delay=48, one_time_cost=40_000, recurring_cost=300,
         term=336, min_authority_level=2, subject_ref="plant_manager",
     )
     m.control_actions["third_line"] = ControlActionDef(
@@ -425,7 +537,7 @@ def _add_control_loop(m: EnterpriseModel) -> None:
         effect=EventEffect(
             kind=EffectKind.RESOURCE_CAPACITY_DELTA, resource_id="production_line", delta=1,
         ),
-        activation_delay=168, one_time_cost=4_500_000, recurring_cost=3_500,
+        activation_delay=168, one_time_cost=450_000, recurring_cost=800,
         reversible=False, success_probability=0.85,
         min_authority_level=3, subject_ref="ceo",
     )
@@ -570,7 +682,19 @@ def build_demo_scenarios() -> list[Scenario]:
         observation_mode="pure_simulation",
         objective=ObjectiveSpec(kpi_id="revenue", target=2_000_000),
     )
-    return [base, demand_growth, extra_line, failures, managed, pure_observation]
+    steady_state = Scenario(
+        id="demo_steady_state", name="Стационарный режим (разогрев 168 ч)",
+        description="Первая неделя считается переходным режимом и отбрасывается: "
+        "статистика и экономика измеряют стационарный режим",
+        enterprise_id=DEMO_ID, base_scenario_id="demo_baseline",
+        seed=DEMO_SEED, monte_carlo_runs=20,
+        warmup_hours=168.0,
+        objective=ObjectiveSpec(kpi_id="revenue", target=1_500_000),
+    )
+    return [
+        base, demand_growth, extra_line, failures, managed, pure_observation,
+        steady_state,
+    ]
 
 
 def create_demo() -> tuple[EnterpriseModel, list[Scenario]]:

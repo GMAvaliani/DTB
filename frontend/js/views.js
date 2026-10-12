@@ -575,12 +575,18 @@ async function vResults(main) {
     content.innerHTML = "";
     const simId = sel.value;
     try {
-      const [state, timeline, events, bottlenecks] = await Promise.all([
-        API.get(`/simulations/${simId}/state`),
-        API.get(`/simulations/${simId}/timeline`),
-        API.get(`/simulations/${simId}/events?limit=500`),
-        API.get(`/simulations/${simId}/bottlenecks`),
-      ]);
+      const [state, timeline, events, bottlenecks, econ, control, decisions, trace, obsErr] =
+        await Promise.all([
+          API.get(`/simulations/${simId}/state`),
+          API.get(`/simulations/${simId}/timeline`),
+          API.get(`/simulations/${simId}/events?limit=500`),
+          API.get(`/simulations/${simId}/bottlenecks`),
+          API.get(`/simulations/${simId}/economics`),
+          API.get(`/simulations/${simId}/rejected-actions`),
+          API.get(`/simulations/${simId}/decisions?limit=200`),
+          API.get(`/simulations/${simId}/policy-trace?limit=200`),
+          API.get(`/simulations/${simId}/observation-error`),
+        ]);
       const tiles = Object.entries(state.final_kpis || {}).slice(0, 10)
         .map(([k, v]) => kpiTile(k, v));
       content.append(el("div", { class: "kpi-row" }, tiles));
@@ -621,6 +627,59 @@ async function vResults(main) {
             Object.entries(timeline.resource_stats).map(([rid, r]) => ({
               cells: [rid, `${(r.utilization * 100).toFixed(1)}%`, fmt(r.busy_hours), r.peak_allocated],
             })))))));
+      // экономика деятельности
+      const e = econ.economics || {};
+      if (e.entries) {
+        const cur = e.currency || "";
+        content.append(card("Экономика деятельности",
+          el("p", { class: "small muted" },
+            `Дисконт ${(e.discount_rate_annual * 100).toFixed(1)}% годовых непрерывно` +
+            (e.warmup_hours ? ` · разогрев ${e.warmup_hours} ч отброшен` : "") +
+            ` · измерено с ${fmtT(e.measured_from)} по ${fmtT(e.measured_to)}`),
+          el("div", { class: "kpi-row" },
+            kpiTile(`NPV, ${cur}`, e.npv), kpiTile(`Итог (номинал), ${cur}`, e.net),
+            kpiTile(`Доход, ${cur}`, e.income), kpiTile(`Расход, ${cur}`, e.expense)),
+          dataTable(["Статья", "Доход", "Расход", "Итог", "Итог дисконтированный"],
+            Object.entries(e.by_article || {}).map(([a, b]) => ({
+              cells: [a, fmt(b.income), fmt(b.expense), fmt(b.net), fmt(b.discounted_net)],
+            }))),
+          Object.keys(e.by_kind || {}).length
+            ? dataTable(["Вид начисления", "Итог", "Итог дисконтированный"],
+                Object.entries(e.by_kind).map(([k, b]) => ({
+                  cells: [{ rate: "ставка", one_time: "разовое", terminal: "остаток" }[k] || k,
+                    fmt(b.net), fmt(b.discounted_net)],
+                })))
+            : null));
+      }
+      // контур управления: МР, политики, наблюдения, стоимость и отклонения
+      if (decisions.decision_moments || trace.policy_firings || (control.rejected_actions || []).length) {
+        const byLoop = trace.by_loop || {};
+        content.append(card("Контур управления",
+          el("div", { class: "kpi-row" },
+            kpiTile("Моментов переключения", decisions.switching_moments),
+            kpiTile("Моментов решений", decisions.decision_moments),
+            kpiTile("Сработок политик", trace.policy_firings),
+            kpiTile("Стоимость управления", (control.control_costs || {}).total)),
+          Object.keys(byLoop).length
+            ? dataTable(["Контур", "Вызовов политик", "Сработало"],
+                Object.entries(byLoop).map(([loop, b]) => ({
+                  cells: [{ regulation: "регулирование", organization: "организация",
+                    development: "развитие" }[loop] || loop, b.calls, b.fired],
+                })))
+            : null,
+          (control.rejected_actions || []).length
+            ? dataTable(["Время", "Действие", "Причина"],
+                control.rejected_actions.slice(0, 20).map(r => ({
+                  cells: [fmtT(r.t), r.action, r.reason],
+                })))
+            : null,
+          Object.keys(obsErr.observations || {}).length
+            ? dataTable(["Наблюдение", "Режим", "Чтений", "Средняя |Y−Ŷ|", "Макс. |Y−Ŷ|"],
+                Object.entries(obsErr.observations).map(([oid, o]) => ({
+                  cells: [oid, o.mode, o.reads, fmt(o.mean_abs_error), fmt(o.max_abs_error)],
+                })))
+            : null));
+      }
       // bottlenecks + event log
       content.append(el("div", { class: "row" },
         el("div", { class: "col" }, card("Узкие места (bottlenecks)",
@@ -759,6 +818,56 @@ async function vCompare(main) {
       kpiSel.addEventListener("change", draw);
       content.append(card(`Baseline: ${cmp.baseline}`, kpiSel, el("div", { style: "margin-top:10px" }, box)));
       draw();
+      // парные разности: сопряжённые прогоны на общих случайных числах
+      const paired = cmp.paired_differences || {};
+      if (Object.keys(paired).length) {
+        const pairedRows = [];
+        for (const [kid, rows] of Object.entries(paired)) {
+          for (const r of rows) {
+            if (!r.n_pairs) continue;
+            pairedRows.push({
+              cells: [kid, r.label, r.n_pairs,
+                r.paired_by_seed ? "по сидам" : "по порядку",
+                fmt(r.mean), fmt(r.std),
+                `[${fmt(r.ci_low)}; ${fmt(r.ci_high)}]`,
+                r.significant ? "значимо" : "не значимо",
+                (r.share_better * 100).toFixed(0) + "%"],
+            });
+          }
+        }
+        if (pairedRows.length) {
+          content.append(card("Парные разности к baseline (95% ДИ)",
+            el("p", { class: "muted small" },
+              "Прогоны сопряжены по сиду: общая случайность вычитается, поэтому " +
+              "интервал узкий. Вывод «лучше» считается обоснованным, если ноль вне интервала."),
+            dataTable(["KPI", "Сценарий", "Пар", "Сопряжение", "Средняя разность",
+              "СКО разности", "95% ДИ", "Вывод", "Доля прогонов лучше"], pairedRows)));
+        }
+      }
+      if ((cmp.paired_npv || []).length) {
+        content.append(card("Парные разности NPV",
+          dataTable(["Сценарий", "Пар", "Средняя разность NPV", "95% ДИ", "Вывод"],
+            cmp.paired_npv.map(r => ({
+              cells: [r.label, r.n_pairs, fmt(r.mean),
+                `[${fmt(r.ci_low)}; ${fmt(r.ci_high)}]`,
+                r.significant ? "значимо" : "не значимо"],
+            })))));
+      }
+      if ((cmp.economics || []).length) {
+        const articles = [...new Set(cmp.economics.flatMap(e => Object.keys(e.by_article || {})))].sort();
+        content.append(card("Экономика сценариев",
+          dataTable(["Сценарий", "NPV", "Итог (номинал)", "Доход", "Расход", "Разогрев, ч"],
+            cmp.economics.map(e => ({
+              cells: [e.label, fmt(e.npv), fmt(e.net), fmt(e.income), fmt(e.expense),
+                e.warmup_hours ?? 0],
+            }))),
+          articles.length
+            ? dataTable(["Статья", ...cmp.economics.map(e => e.label)],
+                articles.map(a => ({
+                  cells: [a, ...cmp.economics.map(e => fmt((e.by_article[a] || {}).net))],
+                })))
+            : null));
+      }
       if (Object.keys(cmp.goals).length) {
         content.append(card("Вероятность достижения целей",
           dataTable(["Цель", ...cmp.goals[Object.keys(cmp.goals)[0]].map(r => r.label)],

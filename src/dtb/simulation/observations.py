@@ -176,6 +176,14 @@ class ObservationLayer:
 
     # ---------------------------------------------------------------- отчёт --
 
+    def reset_error_stats(self) -> None:
+        """Обнулить статистику погрешности (окончание разогрева)."""
+        for st in self._obs.values():
+            st.error_abs_sum = 0.0
+            st.error_rel_sum = 0.0
+            st.error_max_abs = 0.0
+            st.error_count = 0
+
     def error_report(self) -> dict[str, Any]:
         """Накопленная разность оценки и истины по каждому наблюдению."""
         out: dict[str, Any] = {}

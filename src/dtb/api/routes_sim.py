@@ -398,6 +398,18 @@ def simulation_policy_trace(
     }
 
 
+@router.get("/simulations/{sim_id}/economics", dependencies=[VIEW])
+def simulation_economics(request: Request, sim_id: str) -> dict[str, Any]:
+    """Экономика прогона: NPV, раскладка по статьям и видам начисления."""
+    record = _record_or_404(ctx(request), sim_id)
+    result = _sample_result(record)
+    return {
+        "economics": result.economics,
+        "control_costs": result.control_costs,
+        "warmup": result.warmup,
+    }
+
+
 @router.get("/simulations/{sim_id}/rejected-actions", dependencies=[VIEW])
 def simulation_rejected_actions(request: Request, sim_id: str) -> dict[str, Any]:
     """Действия, отклонённые из-за полномочий субъекта или отсутствия субъекта."""

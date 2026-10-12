@@ -93,8 +93,11 @@ GET  /simulations/{id}/policy-trace[?policy_id=]  вызовы политик п
 GET  /simulations/{id}/observation-error    |Y − Ŷ| по компонентам состояния
 GET  /simulations/{id}/rejected-actions     отклонённые и неудавшиеся действия
                                             + стоимость управления по контурам
+GET  /simulations/{id}/economics            NPV, статьи, разогрев
 GET  /simulations/{id}/stream      SSE-прогресс (text/event-stream)
-GET  /simulations/compare?ids=a,b  сравнение (первый — baseline)
+GET  /simulations/compare?ids=a,b  сравнение (первый — baseline): разности
+                                   средних, парные разности по сопряжённым
+                                   прогонам с 95%-ДИ, экономика по статьям
 ```
 
 Запуск блокируется с 422, если валидация модели или сценария имеет критические

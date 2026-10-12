@@ -128,10 +128,18 @@ def test_excel_roundtrip_control_loop():
     assert action.loop.value == "organization"
     assert action.effect.resource_id == "production_line"
     assert action.activation_delay == 48
-    assert action.one_time_cost == 120_000
+    assert action.one_time_cost == demo.control_actions['second_shift_crew'].one_time_cost
     assert action.term == 336
     assert target.control_actions["third_line"].reversible is False
     assert target.control_actions["third_line"].success_probability == 0.85
+    # экономика (фаза 3)
+    assert set(target.economic_items) == set(demo.economic_items)
+    assert target.economics.discount_rate_annual == demo.economics.discount_rate_annual
+    assert target.economics.currency == demo.economics.currency
+    item = target.economic_items["revenue_money"]
+    assert item.kind.value == "one_time" and item.direction.value == "income"
+    assert item.basis.value == "utility_produced" and item.ref == "money"
+    assert target.economic_items["wip_cost"].basis.value == "wip"
     assert target.policies["pol_overtime"].cooldown_hours == 48
     assert target.policies["pol_overtime"].action_ref == "overtime_shift"
     dp = target.decision_points["dp_shift"]

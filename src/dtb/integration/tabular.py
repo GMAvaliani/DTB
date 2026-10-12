@@ -46,6 +46,13 @@ from dtb.domain import (
     UtilityKind,
     UtilityType,
 )
+from dtb.domain.economics import (
+    EconomicBasis,
+    EconomicDirection,
+    EconomicItem,
+    EconomicKind,
+    EconomicsSettings,
+)
 from dtb.domain.control import (
     ControlActionDef,
     ControlLoop,
@@ -83,6 +90,8 @@ SHEETS = [
     "policies",  # контур управления: правила выбора действия
     "decision_points",  # контур управления: когда вызывается политика
     "observations",  # контур управления: что и как наблюдается
+    "economic_items",  # экономика: статьи начисления
+    "economics",  # экономика: настройки прогона (валюта, дисконт, разогрев)
 ]
 
 
@@ -606,6 +615,38 @@ def _apply_observation(model: EnterpriseModel, row: dict[str, Any]) -> tuple[str
     return oid, is_new
 
 
+def _apply_economic_item(model: EnterpriseModel, row: dict[str, Any]) -> tuple[str, bool]:
+    iid = _s(row.get("id"))
+    is_new = iid not in model.economic_items
+    model.economic_items[iid] = EconomicItem(
+        id=iid,
+        name=_s(row.get("name")),
+        description=_s(row.get("description")),
+        article=_s(row.get("article")) or "прочее",
+        kind=_enum(row.get("kind"), EconomicKind, EconomicKind.RATE),
+        basis=_enum(row.get("basis"), EconomicBasis, EconomicBasis.CONSTANT),
+        direction=_enum(row.get("direction"), EconomicDirection, EconomicDirection.EXPENSE),
+        ref=_s(row.get("ref")) or None,
+        rate=_f(row.get("rate"), 0.0) or 0.0,
+        expression=_s(row.get("expression")) or None,
+        enabled=_b(row.get("enabled")),
+    )
+    return iid, is_new
+
+
+def _apply_economics(model: EnterpriseModel, row: dict[str, Any]) -> tuple[str, bool]:
+    """Лист настроек экономики: одна строка на модель."""
+    model.economics = EconomicsSettings(
+        currency=_s(row.get("currency")) or "руб",
+        discount_rate_annual=_f(row.get("discount_rate_annual"), 0.0) or 0.0,
+        hours_per_year=_f(row.get("hours_per_year"), 8760.0) or 8760.0,
+        warmup_hours=_f(row.get("warmup_hours"), 0.0) or 0.0,
+        include_control_costs=_b(row.get("include_control_costs")),
+        control_article=_s(row.get("control_article")) or "управление",
+    )
+    return "economics", True
+
+
 def _apply_series(kind: str) -> Callable[[EnterpriseModel, dict[str, Any]], tuple[str, bool]]:
     def apply(model: EnterpriseModel, row: dict[str, Any]) -> tuple[str, bool]:
         kpi_id = _s(row.get("kpi_id") or row.get("id"))
@@ -638,6 +679,8 @@ _APPLIERS: dict[str, Callable[[EnterpriseModel, dict[str, Any]], tuple[str, bool
     "policies": _apply_policy,
     "decision_points": _apply_decision_point,
     "observations": _apply_observation,
+    "economic_items": _apply_economic_item,
+    "economics": _apply_economics,
 }
 
 _TYPE_NAME = {
@@ -660,6 +703,8 @@ _TYPE_NAME = {
     "policies": "policy",
     "decision_points": "decision_point",
     "observations": "observation",
+    "economic_items": "economic_item",
+    "economics": "economics_settings",
 }
 
 
@@ -676,7 +721,9 @@ def apply_rows(
     for index, row in enumerate(rows, start=2):  # header is row 1
         if not any(_s(v) for v in row.values()):
             continue
-        needs_id = sheet not in ("erp_mappings", "plans", "actuals", "initial_state")
+        needs_id = sheet not in (
+            "erp_mappings", "plans", "actuals", "initial_state", "economics",
+        )
         if needs_id and not _s(row.get("id")):
             report.error(sheet, "отсутствует id", row=index)
             continue
@@ -818,6 +865,20 @@ def model_to_rows(model: EnterpriseModel, sheet: str) -> tuple[list[str], list[l
              o.alpha, int(o.enabled)]
             for o in model.observations.values()
         ]
+    elif sheet == "economic_items":
+        header = ["id", "name", "description", "article", "kind", "basis", "direction",
+                  "ref", "rate", "expression", "enabled"]
+        rows = [
+            [i.id, i.name, i.description, i.article, i.kind.value, i.basis.value,
+             i.direction.value, i.ref or "", i.rate, i.expression or "", int(i.enabled)]
+            for i in model.economic_items.values()
+        ]
+    elif sheet == "economics":
+        e = model.economics
+        header = ["currency", "discount_rate_annual", "hours_per_year", "warmup_hours",
+                  "include_control_costs", "control_article"]
+        rows = [[e.currency, e.discount_rate_annual, e.hours_per_year, e.warmup_hours,
+                 int(e.include_control_costs), e.control_article]]
     else:
         raise KeyError(f"unknown sheet {sheet!r}")
     return header, rows

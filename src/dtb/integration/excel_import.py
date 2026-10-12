@@ -2,7 +2,8 @@
 one sheet per view (goals, seds, utility_types, kpis, plans, actuals,
 org_units, employees, equipment, resources, event_kinds, erp_objects,
 erp_mappings, initial_state) plus the control-loop sheets (subjects,
-control_actions, policies, decision_points, observations)."""
+control_actions, policies, decision_points, observations) and the economics
+sheets (economic_items, economics)."""
 
 from __future__ import annotations
 
@@ -42,6 +43,9 @@ _ALIASES = {
     "решения": "decision_points",
     "точки решений": "decision_points",
     "наблюдения": "observations",
+    "экономика": "economic_items",
+    "статьи": "economic_items",
+    "настройки экономики": "economics",
 }
 
 

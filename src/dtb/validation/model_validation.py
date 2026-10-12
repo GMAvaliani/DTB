@@ -12,6 +12,7 @@ from enum import Enum
 from typing import Any
 
 from dtb.common.expr import ExpressionError, SafeExpression
+from dtb.domain.economics import REF_BASES, EconomicDirection
 from dtb.domain.events import EffectKind, StreamKind
 from dtb.domain.model import EnterpriseModel
 from dtb.domain.scenario import Scenario
@@ -214,6 +215,9 @@ def validate_model(model: EnterpriseModel) -> ValidationReport:
     # --- контур управления ------------------------------------------------------
     _validate_control_loop(r, model)
 
+    # --- экономика --------------------------------------------------------------
+    _validate_economics(r, model)
+
     # goals without any implementing SED → недостижимая цель
     implemented = {s.goal_id for s in seds.values() if s.goal_id}
     for goal in goals.values():
@@ -356,6 +360,46 @@ def _validate_control_loop(r: ValidationReport, model: EnterpriseModel) -> None:
                   "задержка меньше периода: оценка почти всегда актуальна")
 
 
+def _validate_economics(r: ValidationReport, model: EnterpriseModel) -> None:
+    """Проверки статей начисления и настроек экономики."""
+    targets = {
+        "resource": model.resources,
+        "utility_type": model.utility_types,
+        "sed": model.seds,
+    }
+    for item in model.economic_items.values():
+        kind_of_ref = REF_BASES.get(item.basis)
+        if kind_of_ref and item.ref and item.ref not in targets[kind_of_ref]:
+            r.add(Severity.CRITICAL, "broken_ref", "economic_item", item.id,
+                  f"статья ссылается на несуществующий {kind_of_ref} {item.ref!r}")
+        _check_expr(r, item.expression, "economic_item", item.id, "invalid_expression")
+        if item.rate < 0:
+            r.add(Severity.WARNING, "negative_rate", "economic_item", item.id,
+                  "отрицательная ставка: направление задаётся полем direction, "
+                  "а не знаком")
+        if item.enabled and item.rate == 0:
+            r.add(Severity.INFO, "zero_rate", "economic_item", item.id,
+                  "нулевая ставка: статья не влияет на итог")
+    settings = model.economics
+    if settings.warmup_hours >= model.enterprise.planning_horizon_hours:
+        r.add(Severity.CRITICAL, "warmup_too_long", "economics", "economics",
+              f"разогрев {settings.warmup_hours} ч не меньше горизонта "
+              f"{model.enterprise.planning_horizon_hours} ч: измерять будет нечего")
+    elif settings.warmup_hours > model.enterprise.planning_horizon_hours / 2:
+        r.add(Severity.WARNING, "warmup_long", "economics", "economics",
+              "разогрев занимает больше половины горизонта")
+    if settings.discount_rate_annual > 1.0:
+        r.add(Severity.WARNING, "high_discount_rate", "economics", "economics",
+              f"ставка дисконтирования {settings.discount_rate_annual:g} в год "
+              f"выглядит завышенной")
+    if model.economic_items and not any(
+        i.direction == EconomicDirection.INCOME and i.enabled
+        for i in model.economic_items.values()
+    ):
+        r.add(Severity.WARNING, "no_income_items", "economics", "economics",
+              "ни одной статьи дохода: NPV будет заведомо отрицательным")
+
+
 def validate_scenario(model: EnterpriseModel, scenario: Scenario) -> ValidationReport:
     r = ValidationReport()
     for utype_id in scenario.initial_stock_overrides:
@@ -387,6 +431,10 @@ def validate_scenario(model: EnterpriseModel, scenario: Scenario) -> ValidationR
             r.add(Severity.CRITICAL, "broken_ref", "scenario", scenario.id,
                   f"сценарное действие ссылается на несуществующее "
                   f"управляющее действие {action.action_ref!r}")
+    horizon = float(scenario.horizon_hours or model.enterprise.planning_horizon_hours)
+    if scenario.warmup_hours is not None and scenario.warmup_hours >= horizon:
+        r.add(Severity.CRITICAL, "warmup_too_long", "scenario", scenario.id,
+              f"разогрев {scenario.warmup_hours} ч не меньше горизонта {horizon} ч")
     if scenario.objective and scenario.objective.kpi_id not in model.kpis:
         r.add(Severity.CRITICAL, "broken_ref", "scenario", scenario.id,
               f"целевая функция ссылается на несуществующий KPI {scenario.objective.kpi_id!r}")

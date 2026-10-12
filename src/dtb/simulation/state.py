@@ -198,6 +198,30 @@ class SimulationState:
         for sed_id, n in queue_by_sed.items():
             self.queue_peak[sed_id] = max(self.queue_peak.get(sed_id, 0), n)
 
+    def reset_statistics(self) -> None:
+        """Удалить переходный режим: счётчики и интегралы — с нуля.
+
+        Физическое состояние (запасы, пулы СЭД, ёмкости ресурсов) сохраняется:
+        обнуляется только статистика, чтобы итог прогона измерял стационарный
+        режим. Вызывается один раз, в момент окончания разогрева.
+        """
+        self.produced.clear()
+        self.consumed.clear()
+        self.started_count.clear()
+        self.completed_count.clear()
+        self.cancelled_count.clear()
+        self.failed_count.clear()
+        self.event_counts.clear()
+        self.blocked_hours.clear()
+        self.queue_peak.clear()
+        for res in self.resources.values():
+            res.busy_integral = 0.0
+            res.capacity_integral = 0.0
+            res.peak_allocated = res.allocated
+        for inst in self.instances.values():
+            inst.total_waiting = 0.0
+            inst.suspend_count = 0
+
     # -- KPI evaluation context -----------------------------------------------------
 
     def kpi_context(self) -> dict[str, Callable[..., float] | float]:

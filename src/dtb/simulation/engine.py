@@ -38,6 +38,7 @@ from dtb.domain.control import (
     Policy,
     PolicyRule,
 )
+from dtb.domain.economics import EconomicBasis, EconomicItem
 from dtb.domain.events import EffectKind, EventEffect, EventKind, StreamKind
 from dtb.domain.kpi import KPIDefinition
 from dtb.domain.model import (
@@ -56,6 +57,7 @@ from dtb.domain.seds import (
 )
 from dtb.simulation.adapters import AdapterRegistry, ExternalModelError, default_registry
 from dtb.simulation.decisions import DecisionScheduler, DecisionTrigger, select_policies
+from dtb.simulation.economics import EconomicsLedger
 from dtb.simulation.observations import ObservationLayer
 from dtb.simulation.result import Provenance, SimulationResult
 from dtb.simulation.state import SEDInstance, SimulationState
@@ -86,17 +88,6 @@ class _PendingReversion:
     action_id: str
     parameter_path: str
     previous_value: Any
-
-
-@dataclass
-class _CostWindow:
-    """Интервал, на котором действует повременная стоимость действия."""
-
-    action_id: str
-    loop: str
-    rate: float
-    start: float
-    end: float | None
 
 
 @dataclass
@@ -209,8 +200,23 @@ class SimulationEngine:
         self._pending_reversions: list[_PendingReversion] = []
         self._action_seq = 0
         self._rejected_actions: list[dict[str, Any]] = []
-        self._cost_windows: list[_CostWindow] = []
-        self._one_time_costs: list[dict[str, Any]] = []
+        # --- экономика и разогрев (фаза 3) ---
+        econ_settings = self.model.economics
+        overrides: dict[str, Any] = {}
+        if scenario.warmup_hours is not None:
+            overrides["warmup_hours"] = float(scenario.warmup_hours)
+        if scenario.discount_rate_annual is not None:
+            overrides["discount_rate_annual"] = float(scenario.discount_rate_annual)
+        if overrides:
+            econ_settings = econ_settings.model_copy(update=overrides)
+        self.economics = EconomicsLedger(
+            self.model.economic_items, econ_settings, self.horizon
+        )
+        self._warmup_hours = float(econ_settings.warmup_hours or 0.0)
+        self._warmup_report: dict[str, Any] = {
+            "hours": self._warmup_hours,
+            "applied": False,
+        }
         # trigger indexes
         self._on_event: dict[str, list[SEDDefinition]] = {}
         self._on_completed: dict[str, list[SEDDefinition]] = {}
@@ -431,6 +437,9 @@ class SimulationEngine:
             for flow in sed.inputs:
                 ok = self.state.take_stock(flow.utility_type_id, flow.quantity)
                 assert ok, "input availability was checked before start"
+                self.economics.on_event(
+                    EconomicBasis.UTILITY_CONSUMED, flow.utility_type_id, flow.quantity, t
+                )
             inst.inputs_consumed = True
         for req in sed.resources:
             res = self.state.resources[req.resource_id]
@@ -455,6 +464,7 @@ class SimulationEngine:
         self.state.executing[inst.instance_id] = inst
         if not resumed:
             self.state.started_count[sed.id] = self.state.started_count.get(sed.id, 0) + 1
+            self.economics.on_event(EconomicBasis.SED_STARTED, sed.id, 1.0, t)
         self._log_entry(
             "sed_resumed" if resumed else "sed_started",
             sed.id,
@@ -531,6 +541,12 @@ class SimulationEngine:
             spawn_after = list(branch.spawn_sed_ids)
         for utype_id, qty in outputs:
             self.state.add_stock(utype_id, qty)
+            self.economics.on_event(
+                EconomicBasis.UTILITY_PRODUCED, utype_id, qty, self.state.time
+            )
+        self.economics.on_event(
+            EconomicBasis.SED_COMPLETED, inst.sed_id, 1.0, self.state.time
+        )
         self._log_entry(
             "sed_completed",
             inst.sed_id,
@@ -854,13 +870,9 @@ class SimulationEngine:
 
         # разовая стоимость списывается за попытку, в том числе неудачную
         if action.one_time_cost:
-            self._one_time_costs.append(
-                {
-                    "t": round(self.state.time, 6),
-                    "action": action_ref,
-                    "loop": action.loop.value if action.loop else "",
-                    "amount": action.one_time_cost,
-                }
+            self.economics.on_control_action(
+                action_ref, action.loop.value if action.loop else "",
+                action.one_time_cost, self.state.time,
             )
 
         if action.success_probability < 1.0:
@@ -933,14 +945,9 @@ class SimulationEngine:
                 )
             )
         if action.recurring_cost:
-            self._cost_windows.append(
-                _CostWindow(
-                    action_id=action.id,
-                    loop=action.loop.value if action.loop else "",
-                    rate=action.recurring_cost,
-                    start=t,
-                    end=(t + term) if term else None,
-                )
+            self.economics.open_control_window(
+                action.id, action.loop.value if action.loop else "",
+                action.recurring_cost, t, (t + term) if term else None,
             )
         self._log_entry(
             "control_action_applied", action.id, source=source, policy=policy_id,
@@ -962,12 +969,18 @@ class SimulationEngine:
             qty = float(self._eval(effect.quantity_expression, payload) or 0.0)
             if qty > 0:
                 self.state.add_stock(effect.utility_type_id or "", qty)
+                self.economics.on_event(
+                    EconomicBasis.UTILITY_PRODUCED, effect.utility_type_id or "", qty, t
+                )
         elif effect.kind == EffectKind.REMOVE_UTILITY:
             qty = float(self._eval(effect.quantity_expression, payload) or 0.0)
             have = self.state.stock(effect.utility_type_id or "")
             take = min(qty, have)
             if take > 0:
                 self.state.take_stock(effect.utility_type_id or "", take)
+                self.economics.on_event(
+                    EconomicBasis.UTILITY_CONSUMED, effect.utility_type_id or "", take, t
+                )
         elif effect.kind == EffectKind.RESOURCE_CAPACITY_DELTA:
             res = self.state.resources.get(effect.resource_id or "")
             if res is not None and effect.delta is not None:
@@ -1099,6 +1112,8 @@ class SimulationEngine:
         timer_t = self.decisions.next_timer_time(now)
         if timer_t is not None:
             out.append((timer_t, 6, "decision_timer", ("decision_timer", None)))
+        if self._warmup_hours and not self._warmup_report["applied"]:
+            out.append((self._warmup_hours, -1, "warmup", ("warmup", None)))
         for pending in self._pending_activations:
             out.append(
                 (pending.time, 7, f"{pending.seq:012d}", ("activation", pending.seq))
@@ -1243,6 +1258,9 @@ class SimulationEngine:
                         "warning", "revert_failed", action=reversion.action_id,
                         error=str(exc),
                     )
+        elif kind == "warmup":
+            if not self._warmup_report["applied"]:
+                self._apply_warmup()
         elif kind == "obs_sample":
             self.observations.take_samples(self.state.time, self._observation_true_value)
         elif kind == "decision_timer":
@@ -1251,6 +1269,11 @@ class SimulationEngine:
     def _advance_to(self, t: float) -> None:
         dt = t - self.state.time
         if dt > 0:
+            if self.economics.active:
+                # ставки начисляются на интервале, где состояние постоянно
+                self.economics.accrue_interval(
+                    self.state.time, t, self._economic_basis_value
+                )
             self.state.accumulate(dt)
             self.state.time = t
 
@@ -1284,6 +1307,9 @@ class SimulationEngine:
         result.observation_error = self.observations.error_report()
         result.rejected_actions = self._rejected_actions
         result.control_costs = self._control_cost_report()
+        self.economics.accrue_terminal(self.state.time, self._economic_basis_value)
+        result.economics = self.economics.report(self.state.time)
+        result.warmup = self._warmup_report
         result.final_stocks = {k: round(v, 6) for k, v in self.state.stocks.items()}
         context = self.state.kpi_context()
         for kid, expr in self._kpi_exprs.items():
@@ -1355,49 +1381,75 @@ class SimulationEngine:
             ),
             "rejected_actions": len(self._rejected_actions),
             "control_cost_total": result.control_costs.get("total", 0.0),
+            "npv": result.economics.get("npv", 0.0),
+            "warmup_hours": self._warmup_hours,
         }
+
+    def _economic_basis_value(self, item: EconomicItem) -> float:
+        """Значение базы начисления на текущем интервале состояния."""
+        st = self.state
+        basis = item.basis
+        if basis == EconomicBasis.CONSTANT:
+            return 1.0
+        if basis == EconomicBasis.RESOURCE_CAPACITY:
+            res = st.resources.get(item.ref or "")
+            return res.capacity(st.time) if res else 0.0
+        if basis == EconomicBasis.RESOURCE_BUSY:
+            res = st.resources.get(item.ref or "")
+            return res.allocated if res else 0.0
+        if basis == EconomicBasis.UTILITY_STOCK:
+            return st.stock(item.ref or "")
+        if basis == EconomicBasis.WIP:
+            if item.ref:
+                return float(
+                    sum(1 for i in st.executing.values() if i.sed_id == item.ref)
+                    + sum(1 for i in st.waiting if i.sed_id == item.ref)
+                )
+            return float(len(st.executing) + len(st.waiting))
+        if basis == EconomicBasis.QUEUE:
+            if item.ref:
+                return float(sum(1 for i in st.waiting if i.sed_id == item.ref))
+            return float(len(st.waiting))
+        if basis == EconomicBasis.EXPRESSION:
+            try:
+                return float(self._eval(item.expression, {}) or 0.0)
+            except (ExpressionError, TypeError, ValueError):
+                return 0.0
+        return 0.0
+
+    def _apply_warmup(self) -> None:
+        """Удалить переходный режим: статистика считается от момента разогрева."""
+        st = self.state
+        self._warmup_report = {
+            "hours": self._warmup_hours,
+            "applied": True,
+            "dropped": {
+                "np_events": self._n_np_events,
+                "switching_moments": self._n_moments,
+                "decision_moments": self._n_decisions,
+                "policy_firings": sum(1 for e in self._policy_trace if e.get("fired")),
+                "instances_completed": sum(st.completed_count.values()),
+            },
+            "stocks_at_warmup": {k: round(v, 6) for k, v in sorted(st.stocks.items())},
+        }
+        st.reset_statistics()
+        self.observations.reset_error_stats()
+        self._n_np_events = 0
+        self._n_moments = 0
+        self._n_decisions = 0
+        self._policy_trace = []
+        self._decision_log = []
+        self._last_decision_time = st.time
+        self._kpi_series = {k: [] for k in self.model.kpis}
+        self._stock_series = {u: [] for u in self.model.utility_types}
+        self._pool_series = []
+        self._last_record_t = None
+        self._log_entry("warmup_completed", "warmup", hours=self._warmup_hours)
+        self._record_series(force=True)
 
     def _control_cost_report(self) -> dict[str, Any]:
-        """Стоимость управления: разовая за попытки + повременная за часы действия."""
-        by_action: dict[str, dict[str, float]] = {}
-        by_loop: dict[str, float] = {}
-
-        def bucket(action_id: str, loop: str) -> dict[str, float]:
-            return by_action.setdefault(
-                action_id,
-                {"one_time": 0.0, "recurring": 0.0, "total": 0.0, "attempts": 0.0,
-                 "loop": loop},  # type: ignore[dict-item]
-            )
-
-        one_time_total = 0.0
-        for entry in self._one_time_costs:
-            data = bucket(entry["action"], entry["loop"])
-            data["one_time"] += entry["amount"]
-            data["attempts"] += 1
-            one_time_total += entry["amount"]
-            by_loop[entry["loop"]] = by_loop.get(entry["loop"], 0.0) + entry["amount"]
-
-        recurring_total = 0.0
-        end_of_run = self.state.time
-        for window in self._cost_windows:
-            stop = min(window.end if window.end is not None else end_of_run, end_of_run)
-            hours = max(0.0, stop - window.start)
-            amount = hours * window.rate
-            data = bucket(window.action_id, window.loop)
-            data["recurring"] += amount
-            recurring_total += amount
-            by_loop[window.loop] = by_loop.get(window.loop, 0.0) + amount
-        for data in by_action.values():
-            data["total"] = round(data["one_time"] + data["recurring"], 6)
-            data["one_time"] = round(data["one_time"], 6)
-            data["recurring"] = round(data["recurring"], 6)
-        return {
-            "one_time": round(one_time_total, 6),
-            "recurring": round(recurring_total, 6),
-            "total": round(one_time_total + recurring_total, 6),
-            "by_action": by_action,
-            "by_loop": {k: round(v, 6) for k, v in sorted(by_loop.items())},
-        }
+        """Стоимость управления: разовая за попытки + повременная за часы."""
+        return self.economics.control_cost_report(self.state.time)
 
     def _goal_achievement(self, result: SimulationResult) -> dict[str, dict[str, Any]]:
         out: dict[str, dict[str, Any]] = {}
