@@ -655,8 +655,10 @@ def _add_control_loop(m: EnterpriseModel) -> None:
     )
     m.decision_points["dp_week"] = DecisionPoint(
         id="dp_week", name="Недельный штаб", kind=DecisionPointKind.TIMER,
-        description="Регламентный момент решения контура организации",
-        timer_period=168, timer_start=168, policy_ref="pol_second_shift",
+        description="Регламентный момент решения контура организации. Время "
+        "выбрано внутри смены: в ночь на понедельник наблюдаемая загрузка "
+        "отражает выходные, и решение опиралось бы на нерабочие часы",
+        timer_period=168, timer_start=186, policy_ref="pol_second_shift",
     )
     m.decision_points["dp_quarter"] = DecisionPoint(
         id="dp_quarter", name="Инвестиционный комитет", kind=DecisionPointKind.TIMER,
