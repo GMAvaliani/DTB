@@ -47,12 +47,14 @@ docker build -t dtb . && docker run -p 8000:8000 dtb
 
 | Слой | Пакет | Кратко |
 |---|---|---|
-| Доменная модель | `dtb.domain` | Enterprise, Goal, СЭД, Utility, Resource, Organization, Equipment, ERP-объекты, НП-события, KPI, Scenario |
-| Движок симуляции | `dtb.simulation` | event-driven continuous-time, пулы ожидающих/выполняемых СЭД, пуассоновские/плановые/внешние потоки, Mode A/Mode B, детерминизм по seed |
+| Доменная модель | `dtb.domain` | Enterprise, Goal, СЭД, Utility, Resource, Organization, Equipment, ERP-объекты, НП-события, KPI, Scenario; контур управления (Subject, ControlAction, Policy, DecisionPoint, Observation), экономика, календари работы |
+| Движок симуляции | `dtb.simulation` | event-driven continuous-time, пулы ожидающих/выполняемых СЭД, пуассоновские/плановые/внешние потоки, Mode A/Mode B, детерминизм по seed; моменты принятия решений и политики трёх контуров, слой наблюдений, дисциплины очередей, режимы прерывания, экономика с дисконтированием, просмотр вперёд |
 | Граф знаний | `dtb.graph` | проекция модели, HAS_GOAL/PRODUCES/CONSUMES/TRIGGERS/…, impact/dependency-анализ |
 | Аналитика | `dtb.analysis` | Монте-Карло, прогноз (факт/план/прогноз + CI), bottlenecks, сравнение сценариев |
-| Оптимизация | `dtb.optimization` | objective/variables/constraints, grid & random search, plugin-реестр |
+| Оптимизация | `dtb.optimization` | objective/variables/constraints, grid, random и покоординатный поиск, подбор порогов политик, критерий по квантилю, plugin-реестр |
 | Валидация | `dtb.validation` | ворота перед симуляцией + Data Quality Report |
+| Верификация | `dtb.verification` | аналитические эталоны (M/M/1, M/M/c, D/D/1, дисконтирование, закон Литтла) и инварианты прогона |
+| Стыковка | `dtb.interop` | контракт «модель + политика + сиды → траектория, экономика, журналы», проверка и сравнение движков |
 | Интеграция | `dtb.integration` | Excel/CSV/JSON-импорт (структура книги по видам 1–8), mock-ERP, generic REST-коннектор |
 | Хранение | `dtb.persistence` | SQLite→PostgreSQL, версии модели с diff, audit trail, time-series |
 | API | `dtb.api` | REST + SSE-прогресс, роли viewer/editor/admin, tenant-изоляция |
@@ -68,7 +70,11 @@ docker build -t dtb . && docker run -p 8000:8000 dtb
 - [docs/KNOWLEDGE_GRAPH.md](docs/KNOWLEDGE_GRAPH.md) — граф знаний и causal-запросы
 - [docs/API.md](docs/API.md) — REST API (также: `/docs` на запущенном сервере)
 - [docs/ERP_INTEGRATION.md](docs/ERP_INTEGRATION.md) — коннекторы и импорт
-- [docs/OPTIMIZATION.md](docs/OPTIMIZATION.md) — оптимизационный контур
+- [docs/OPTIMIZATION.md](docs/OPTIMIZATION.md) — оптимизационный контур и просмотр вперёд
+- [docs/VERIFICATION.md](docs/VERIFICATION.md) — сверка расчёта с аналитическими эталонами
+- [docs/INTEROP.md](docs/INTEROP.md) — контракт стыковки движков
+- [docs/SUBJECT_DELIMITATION.md](docs/SUBJECT_DELIMITATION.md) — размежевание предметов работ
+- [CHANGELOG.md](CHANGELOG.md) — что добавлено по фазам
 - [docs/AI_ARCHITECTURE.md](docs/AI_ARCHITECTURE.md) — AI-слой
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) — разработка и тесты
 - [docs/ROADMAP.md](docs/ROADMAP.md) — что сделано и что дальше
@@ -77,17 +83,25 @@ docker build -t dtb . && docker run -p 8000:8000 dtb
 ## Тесты
 
 ```bash
-python -m pytest            # unit + integration + e2e (95 тестов)
+python -m pytest            # unit + integration + e2e (293 теста, ~20 с)
+python -m pytest -m verification   # сверка с аналитическими эталонами (24 теста, ~65 с)
+dtb verify                  # те же эталоны из командной строки
+dtb verify-run <scenario>   # инварианты на прогоне сценария
+dtb certify <enterprise>    # проверка движка на соответствие контракту стыковки
 ```
 
 Ключевой инвариант: одинаковые (модель, сценарий, начальное состояние, seed) ⇒
 бит-идентичный результат симуляции (`SimulationResult.content_digest()`).
+Второй контур доверия — верификация: расчёт сверяется с задачами, решёнными в
+теории, а каждый прогон проверяется на инварианты (баланс полезностей, закон
+Литтла, учёт ресурсов, сходимость экономики).
 
 ## Конфигурация
 
 | Переменная | Назначение | По умолчанию |
 |---|---|---|
 | `DTB_DATABASE_URL` | SQLAlchemy URL | `sqlite:///./data/dtb.db` |
+| `DTB_INTEROP_HOSTS` | список хостов внешних движков через запятую | пусто — без ограничений |
 | `DTB_DATA_DIR` | каталог данных для SQLite | `./data` |
 | `DTB_API_KEYS` | `key:role[:enterprise_id],…` (roles: viewer/editor/admin) | не задано → открытый dev-режим |
 | `DTB_EXTERNAL_MODEL_HOSTS` | allowlist хостов внешних моделей (Mode B) | не задано → любой http(s) |
