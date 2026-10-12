@@ -24,6 +24,7 @@ src/dtb/
   optimization/ objective/variables/optimizers (см. OPTIMIZATION.md)
   validation/   валидация модели + data quality
   verification/ сверка расчёта с аналитическими эталонами (см. VERIFICATION.md)
+  interop/      контракт стыковки движков (см. INTEROP.md)
   integration/  импорт/коннекторы (см. ERP_INTEGRATION.md)
   persistence/  SQLAlchemy, версии, аудит, серии
   services/     фоновые job'ы (точка выделения воркеров)

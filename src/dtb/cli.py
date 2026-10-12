@@ -8,6 +8,7 @@ Commands:
     dtb export-template <path.xlsx>
     dtb verify [--benchmarks mm1,mmc,...] [--replications N] [--seed S]
     dtb verify-run <scenario_id> [--seed S]
+    dtb certify <enterprise_id> [--uri URL] [--seeds 1,2,3]
 """
 
 from __future__ import annotations
@@ -46,6 +47,14 @@ def main(argv: list[str] | None = None) -> int:
     p_ver.add_argument("--replications", type=int, default=3)
     p_ver.add_argument("--seed", type=int, default=20260101)
     p_ver.add_argument("--horizon", type=float, default=None)
+
+    p_cert = sub.add_parser(
+        "certify", help="проверить движок на соответствие контракту стыковки"
+    )
+    p_cert.add_argument("enterprise_id")
+    p_cert.add_argument("--uri", default="", help="URI внешнего движка; пусто — свой")
+    p_cert.add_argument("--seeds", default="1,2,3")
+    p_cert.add_argument("--horizon", type=float, default=None)
 
     p_vrun = sub.add_parser(
         "verify-run", help="проверить инварианты на прогоне сценария"
@@ -154,6 +163,35 @@ def main(argv: list[str] | None = None) -> int:
         report = verify_run(result, model)
         print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
         return 0 if report.passed else 3
+
+    if args.command == "certify":
+        from dtb.interop import (
+            ContractRequest,
+            DTBEngineAdapter,
+            HTTPEngineAdapter,
+            certify,
+        )
+
+        model = db.load_model(args.enterprise_id)
+        if model is None:
+            print(f"Предприятие {args.enterprise_id!r} не найдено", file=sys.stderr)
+            return 1
+        scenario: dict[str, object] = {}
+        if args.horizon:
+            scenario["horizon_hours"] = args.horizon
+        request = ContractRequest(
+            model=model.to_snapshot(),
+            scenario=scenario,
+            seeds=[int(s) for s in args.seeds.split(",") if s.strip()],
+        )
+        adapter = (
+            HTTPEngineAdapter(args.uri, name="external")
+            if args.uri
+            else DTBEngineAdapter()
+        )
+        report = certify(adapter, request)
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0 if report["passed"] else 3
 
     if args.command == "export-template":
         from dtb.domain import Enterprise, EnterpriseModel

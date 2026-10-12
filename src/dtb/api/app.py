@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 import dtb
 from dtb.api.deps import AppContext
+from dtb.api.routes_interop import router as interop_router
 from dtb.api.routes_model import router as model_router
 from dtb.api.routes_sim import router as sim_router
 from dtb.api.security import auth_enabled
@@ -51,6 +52,7 @@ def create_app(db: Database | None = None) -> FastAPI:
 
     app.include_router(model_router, prefix="/api", tags=["model"])
     app.include_router(sim_router, prefix="/api", tags=["simulation"])
+    app.include_router(interop_router, prefix="/api", tags=["interop"])
 
     @app.get("/api/health")
     def health() -> dict[str, str]:
