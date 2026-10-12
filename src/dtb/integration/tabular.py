@@ -9,6 +9,10 @@ Compact cell syntax:
 - goal targets: ``"revenue:>=:100000"`` or ``"revenue:>=:100000:720"`` (deadline)
 - policy rules: ``"stock('steel') < 50 -> buy_steel @ 2; true -> hold"``
   (condition ``->`` action ``@`` magnitude expression)
+- calendar shifts: ``"пн-пт:8-20; сб:9-14@0.5"`` (days ``:`` hours ``@`` capacity
+  factor; days may be omitted for «every day», named ``пн…вс`` or numbered 0–6)
+- calendar exceptions: ``"600-648; 1000-1008:работа"`` (model-time interval;
+  the ``работа``/``work`` marker turns it into an extra shift)
 - complex structures (outcome branches, event effects) are JSON cells.
 """
 
@@ -46,6 +50,9 @@ from dtb.domain import (
     UtilityKind,
     UtilityType,
 )
+from dtb.domain.calendars import WEEKDAY_NAMES, Calendar, CalendarException, Shift
+from dtb.domain.resources import QueueDiscipline
+from dtb.domain.seds import InterruptionMode
 from dtb.domain.economics import (
     EconomicBasis,
     EconomicDirection,
@@ -90,6 +97,7 @@ SHEETS = [
     "policies",  # контур управления: правила выбора действия
     "decision_points",  # контур управления: когда вызывается политика
     "observations",  # контур управления: что и как наблюдается
+    "calendars",  # режимы работы: смены, выходные, остановки
     "economic_items",  # экономика: статьи начисления
     "economics",  # экономика: настройки прогона (валюта, дисконт, разогрев)
 ]
@@ -320,6 +328,9 @@ def _apply_sed(model: EnterpriseModel, row: dict[str, Any]) -> tuple[str, bool]:
         continuation_condition=_s(row.get("continuation_condition")) or None,
         priority=_i(row.get("priority"), 100) or 100,
         max_concurrent=_i(row.get("max_concurrent")),
+        interruption_mode=_enum(
+            row.get("interruption_mode"), InterruptionMode, InterruptionMode.RESUME
+        ),
     )
     return sid, is_new
 
@@ -336,6 +347,8 @@ def _apply_resource(model: EnterpriseModel, row: dict[str, Any]) -> tuple[str, b
         unit=_s(row.get("unit")) or "unit",
         org_unit_id=_s(row.get("org_unit_id")) or None,
         cost_per_hour=_f(row.get("cost_per_hour"), 0.0) or 0.0,
+        queue_discipline=_enum(row.get("queue_discipline"), QueueDiscipline, None),
+        calendar_ref=_s(row.get("calendar_ref")) or None,
     )
     return rid, is_new
 
@@ -615,6 +628,130 @@ def _apply_observation(model: EnterpriseModel, row: dict[str, Any]) -> tuple[str
     return oid, is_new
 
 
+def parse_shifts(cell: Any) -> list[Shift]:
+    """``"пн-пт:8-20; сб:9-14@0.5"`` либо JSON-массив смен."""
+    text = _s(cell)
+    if not text:
+        return []
+    if text.startswith("["):
+        return [Shift.model_validate(x) for x in json.loads(text)]
+    out: list[Shift] = []
+    for part in text.split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        head, sep, tail = part.rpartition(":")
+        hours, days = (tail, head) if sep else (part, "")
+        hours, _, factor = hours.partition("@")
+        start, _, end = hours.partition("-")
+        try:
+            start_hour, end_hour = float(start), float(end)
+        except ValueError as exc:
+            raise ValueError(f"смена {part!r}: ожидается запись «часы 8-20»") from exc
+        capacity_factor = float(factor) if factor.strip() else 1.0
+        for day in _parse_weekdays(days):
+            out.append(
+                Shift(
+                    day_of_week=day, start_hour=start_hour, end_hour=end_hour,
+                    capacity_factor=capacity_factor, label=part,
+                )
+            )
+    return out
+
+
+def _parse_weekdays(text: str) -> list[int | None]:
+    """Дни недели: пусто или ``*`` — все дни; ``пн-пт``; ``сб``; ``0-4``; ``1,3``."""
+    text = text.strip().lower()
+    if not text or text in ("*", "все", "ежедневно"):
+        return [None]
+    days: list[int | None] = []
+    for chunk in text.replace(" ", "").split(","):
+        if not chunk:
+            continue
+        if "-" in chunk:
+            first, _, last = chunk.partition("-")
+            a, b = _weekday_index(first), _weekday_index(last)
+            days.extend(range(a, b + 1) if a <= b else list(range(a, 7)) + list(range(0, b + 1)))
+        else:
+            days.append(_weekday_index(chunk))
+    return days or [None]
+
+
+def _weekday_index(token: str) -> int:
+    token = token.strip().lower()
+    if token in WEEKDAY_NAMES:
+        return WEEKDAY_NAMES.index(token)
+    try:
+        value = int(token)
+    except ValueError as exc:
+        raise ValueError(
+            f"день недели {token!r} не распознан: допустимы "
+            f"{', '.join(WEEKDAY_NAMES)} либо числа 0–6"
+        ) from exc
+    if not 0 <= value <= 6:
+        raise ValueError(f"день недели {value} вне диапазона 0–6")
+    return value
+
+
+def encode_shifts(shifts: list[Shift]) -> str:
+    parts = []
+    for shift in shifts:
+        day = WEEKDAY_NAMES[shift.day_of_week] + ":" if shift.day_of_week is not None else ""
+        factor = f"@{shift.capacity_factor:g}" if shift.capacity_factor != 1.0 else ""
+        parts.append(f"{day}{shift.start_hour:g}-{shift.end_hour:g}{factor}")
+    return "; ".join(parts)
+
+
+def parse_calendar_exceptions(cell: Any) -> list[CalendarException]:
+    """``"600-648; 1000-1008:работа"`` либо JSON-массив исключений."""
+    text = _s(cell)
+    if not text:
+        return []
+    if text.startswith("["):
+        return [CalendarException.model_validate(x) for x in json.loads(text)]
+    out: list[CalendarException] = []
+    for part in text.split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        interval, _, marker = part.partition(":")
+        interval, _, factor = interval.partition("@")
+        start, _, end = interval.partition("-")
+        working = marker.strip().lower() in ("работа", "work", "смена", "да", "true")
+        out.append(
+            CalendarException(
+                from_hour=float(start), to_hour=float(end), working=working,
+                capacity_factor=float(factor) if factor.strip() else 1.0,
+                label=part,
+            )
+        )
+    return out
+
+
+def encode_calendar_exceptions(exceptions: list[CalendarException]) -> str:
+    parts = []
+    for exc in exceptions:
+        marker = ":работа" if exc.working else ""
+        factor = f"@{exc.capacity_factor:g}" if exc.working and exc.capacity_factor != 1.0 else ""
+        parts.append(f"{exc.from_hour:g}-{exc.to_hour:g}{factor}{marker}")
+    return "; ".join(parts)
+
+
+def _apply_calendar(model: EnterpriseModel, row: dict[str, Any]) -> tuple[str, bool]:
+    cid = _s(row.get("id"))
+    is_new = cid not in model.calendars
+    model.calendars[cid] = Calendar(
+        id=cid,
+        name=_s(row.get("name")),
+        description=_s(row.get("description")),
+        shifts=parse_shifts(row.get("shifts")),
+        exceptions=parse_calendar_exceptions(row.get("exceptions")),
+        off_shift_factor=_f(row.get("off_shift_factor"), 0.0) or 0.0,
+        enabled=_b(row.get("enabled")),
+    )
+    return cid, is_new
+
+
 def _apply_economic_item(model: EnterpriseModel, row: dict[str, Any]) -> tuple[str, bool]:
     iid = _s(row.get("id"))
     is_new = iid not in model.economic_items
@@ -679,6 +816,7 @@ _APPLIERS: dict[str, Callable[[EnterpriseModel, dict[str, Any]], tuple[str, bool
     "policies": _apply_policy,
     "decision_points": _apply_decision_point,
     "observations": _apply_observation,
+    "calendars": _apply_calendar,
     "economic_items": _apply_economic_item,
     "economics": _apply_economics,
 }
@@ -703,6 +841,7 @@ _TYPE_NAME = {
     "policies": "policy",
     "decision_points": "decision_point",
     "observations": "observation",
+    "calendars": "calendar",
     "economic_items": "economic_item",
     "economics": "economics_settings",
 }
@@ -754,20 +893,23 @@ def model_to_rows(model: EnterpriseModel, sheet: str) -> tuple[list[str], list[l
         header = ["id", "name", "description", "goal_id", "parent_id", "org_unit_id",
                   "inputs", "outputs", "resources", "equipment_ids", "duration",
                   "triggers", "start_condition", "continuation_condition", "priority",
-                  "max_concurrent", "branches"]
+                  "max_concurrent", "interruption_mode", "branches"]
         rows = [
             [s.id, s.name, s.description, s.goal_id or "", s.parent_id or "", s.org_unit_id or "",
              encode_flows(s.inputs), encode_flows(s.outputs), encode_requirements(s.resources),
              "; ".join(s.equipment_ids), encode_duration(s.duration), encode_triggers(s.triggers),
              s.start_condition or "", s.continuation_condition or "", s.priority,
-             s.max_concurrent or "",
+             s.max_concurrent or "", s.interruption_mode.value,
              json.dumps([b.model_dump(mode="json", exclude_defaults=True) for b in s.outcome_branches], ensure_ascii=False)
              if s.outcome_branches else ""]
             for s in model.seds.values()
         ]
     elif sheet == "resources":
-        header = ["id", "name", "kind", "capacity", "unit", "org_unit_id", "cost_per_hour"]
-        rows = [[r.id, r.name, r.kind.value, r.capacity, r.unit, r.org_unit_id or "", r.cost_per_hour]
+        header = ["id", "name", "kind", "capacity", "unit", "org_unit_id", "cost_per_hour",
+                  "queue_discipline", "calendar_ref"]
+        rows = [[r.id, r.name, r.kind.value, r.capacity, r.unit, r.org_unit_id or "",
+                 r.cost_per_hour,
+                 r.queue_discipline.value if r.queue_discipline else "", r.calendar_ref or ""]
                 for r in model.resources.values()]
     elif sheet == "org_units":
         header = ["id", "name", "kind", "parent_id", "headcount_plan"]
@@ -864,6 +1006,14 @@ def model_to_rows(model: EnterpriseModel, sheet: str) -> tuple[list[str], list[l
              o.period, o.delay, o.relative_error, o.estimator.value, o.mode.value,
              o.alpha, int(o.enabled)]
             for o in model.observations.values()
+        ]
+    elif sheet == "calendars":
+        header = ["id", "name", "description", "shifts", "exceptions",
+                  "off_shift_factor", "enabled"]
+        rows = [
+            [c.id, c.name, c.description, encode_shifts(c.shifts),
+             encode_calendar_exceptions(c.exceptions), c.off_shift_factor, int(c.enabled)]
+            for c in model.calendars.values()
         ]
     elif sheet == "economic_items":
         header = ["id", "name", "description", "article", "kind", "basis", "direction",

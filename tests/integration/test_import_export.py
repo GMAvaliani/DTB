@@ -178,3 +178,49 @@ def test_csv_policy_rules_compact_syntax(small_model):
     assert policy.rules[0].action_ref == "add_line"
     assert policy.rules[0].magnitude_expression == "2"
     assert policy.rules[1].magnitude_expression is None
+
+
+def test_excel_roundtrip_calendars_and_queues():
+    """Фаза 5: календари, дисциплины очередей и режимы прерывания через Excel."""
+    from dtb.demo import build_demo_model
+
+    demo = build_demo_model()
+    target = EnterpriseModel(enterprise=Enterprise(id="copy", name="Copy"))
+    report = import_workbook(target, export_workbook(demo))
+    assert report.ok, report.errors
+    assert set(target.calendars) == set(demo.calendars)
+    two_shifts = target.calendars["two_shifts"]
+    assert len(two_shifts.shifts) == len(demo.calendars["two_shifts"].shifts)
+    assert {(s.day_of_week, s.start_hour, s.end_hour) for s in two_shifts.shifts} == {
+        (s.day_of_week, s.start_hour, s.end_hour)
+        for s in demo.calendars["two_shifts"].shifts
+    }
+    assert two_shifts.exceptions[0].from_hour == 336.0
+    assert two_shifts.exceptions[0].working is False
+    assert target.resources["production_line"].calendar_ref == "two_shifts"
+    assert target.resources["qc_station"].queue_discipline.value == "spt"
+    assert target.resources["delivery_trucks"].queue_discipline.value == "fifo"
+    assert target.seds["quality_control"].interruption_mode.value == "restart"
+    assert target.seds["delivery"].interruption_mode.value == "wait"
+    assert validate_model(target).ok_to_simulate
+
+
+def test_csv_calendar_compact_syntax(small_model):
+    """Смены читаются из компактной записи «пн-пт:8-20; сб:9-14@0.5»."""
+    from dtb.integration import import_csv
+
+    report = import_csv(
+        small_model,
+        "calendars",
+        "id,name,shifts,exceptions\n"
+        'main,Основной,"пн-пт:8-20; сб:9-14@0.5","600-648; 700-708:работа"\n',
+    )
+    assert report.ok, report.errors
+    calendar = small_model.calendars["main"]
+    assert len(calendar.shifts) == 6
+    assert calendar.shifts[0].day_of_week == 0 and calendar.shifts[0].start_hour == 8
+    saturday = next(s for s in calendar.shifts if s.day_of_week == 5)
+    assert saturday.capacity_factor == 0.5
+    assert len(calendar.exceptions) == 2
+    assert calendar.exceptions[0].working is False
+    assert calendar.exceptions[1].working is True

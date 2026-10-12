@@ -91,6 +91,8 @@ class ResourceState:
         "busy_integral",
         "capacity_integral",
         "peak_allocated",
+        "calendar_factor",
+        "off_shift_hours",
     )
 
     def __init__(self, resource_id: str, capacity: float):
@@ -101,11 +103,19 @@ class ResourceState:
         self.busy_integral = 0.0
         self.capacity_integral = 0.0
         self.peak_allocated = 0.0
+        #: доля ёмкости по календарю на текущем интервале (1.0 — без календаря)
+        self.calendar_factor = 1.0
+        self.off_shift_hours = 0.0  # часы, когда ресурс был недоступен по графику
 
     def capacity(self, t: float) -> float:
+        """Доступная ёмкость: база ± временные дельты, умноженные на календарь."""
+        raw = self.base_capacity + sum(d for exp, d in self.temp_deltas if exp > t)
+        return max(0.0, raw * self.calendar_factor)
+
+    def nominal_capacity(self, t: float) -> float:
+        """Ёмкость без учёта календаря — сколько есть «на балансе»."""
         return max(
-            0.0,
-            self.base_capacity + sum(d for exp, d in self.temp_deltas if exp > t),
+            0.0, self.base_capacity + sum(d for exp, d in self.temp_deltas if exp > t)
         )
 
     def available(self, t: float) -> float:
@@ -122,6 +132,8 @@ class ResourceState:
         self.busy_integral += self.allocated * dt
         self.capacity_integral += self.capacity(t) * dt
         self.peak_allocated = max(self.peak_allocated, self.allocated)
+        if self.calendar_factor <= 0:
+            self.off_shift_hours += dt
 
     def utilization(self) -> float:
         if self.capacity_integral <= 0:
@@ -233,6 +245,7 @@ class SimulationState:
             res.busy_integral = 0.0
             res.capacity_integral = 0.0
             res.peak_allocated = res.allocated
+            res.off_shift_hours = 0.0
         for inst in self.instances.values():
             inst.total_waiting = 0.0
             inst.suspend_count = 0

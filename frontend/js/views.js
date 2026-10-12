@@ -618,14 +618,20 @@ async function vResults(main) {
       // sed + resource stats
       content.append(el("div", { class: "row" },
         el("div", { class: "col" }, card("Статистика СЭД",
-          dataTable(["СЭД", "Создано", "Завершено", "Приостановок", "Часы ожидания", "Пик очереди"],
+          dataTable(["СЭД", "Создано", "Завершено", "Отказов", "Приостановок",
+            "Часы ожидания", "Пик очереди", "Среднее ожидание"],
             Object.entries(timeline.sed_stats).map(([sid, s]) => ({
-              cells: [sid, s.created, s.completed, s.suspensions, fmt(s.waiting_hours), s.queue_peak],
+              cells: [sid, s.created, s.completed, s.failed ?? 0, s.suspensions,
+                fmt(s.waiting_hours), s.queue_peak, fmt(s.mean_waiting)],
             }))))),
         el("div", { class: "col" }, card("Ресурсы",
-          dataTable(["Ресурс", "Загрузка", "Занято, ч", "Пик"],
+          dataTable(["Ресурс", "Загрузка", "Занято, ч", "Пик", "Вне смен, ч", "Ёмкость"],
             Object.entries(timeline.resource_stats).map(([rid, r]) => ({
-              cells: [rid, `${(r.utilization * 100).toFixed(1)}%`, fmt(r.busy_hours), r.peak_allocated],
+              cells: [rid, `${(r.utilization * 100).toFixed(1)}%`, fmt(r.busy_hours),
+                r.peak_allocated, fmt(r.off_shift_hours),
+                r.nominal_capacity !== undefined && r.nominal_capacity !== r.final_capacity
+                  ? `${fmt(r.final_capacity)} из ${fmt(r.nominal_capacity)}`
+                  : fmt(r.final_capacity)],
             })))))));
       // экономика деятельности
       const e = econ.economics || {};

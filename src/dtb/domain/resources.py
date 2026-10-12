@@ -27,12 +27,33 @@ class ResourceKind(str, Enum):
     OTHER = "other"
 
 
+class QueueDiscipline(str, Enum):
+    """Порядок выбора из очереди при конкуренции за ресурс.
+
+    * ``fifo`` — первым пришёл, первым обслужен (по порядку создания);
+    * ``lifo`` — последним пришёл, первым обслужен (стек);
+    * ``spt`` — сначала короткие работы (shortest processing time): ожидаемая
+      длительность СЭД берётся из модели длительности;
+    * ``priority`` — по приоритету СЭД, при равенстве — по порядку создания
+      (поведение по умолчанию, совпадает с прежним).
+    """
+
+    PRIORITY = "priority"
+    FIFO = "fifo"
+    LIFO = "lifo"
+    SPT = "spt"
+
+
 class Resource(EntityBase):
     kind: ResourceKind = ResourceKind.OTHER
     capacity: float = Field(default=1.0, ge=0)
     unit: str = "unit"
     org_unit_id: str | None = None
     cost_per_hour: float = Field(default=0.0, ge=0)
+    #: дисциплина очереди к этому ресурсу; пусто — дисциплина модели
+    queue_discipline: QueueDiscipline | None = None
+    #: график работы ресурса; вне смены доступная ёмкость равна нулю
+    calendar_ref: str | None = None
 
 
 class OrgUnitKind(str, Enum):

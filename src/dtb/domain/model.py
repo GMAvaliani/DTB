@@ -14,6 +14,7 @@ from typing import Any, Iterator
 from pydantic import BaseModel, ConfigDict, Field
 
 from dtb.domain.base import EntityBase
+from dtb.domain.calendars import Calendar
 from dtb.domain.economics import EconomicItem, EconomicsSettings
 from dtb.domain.control import (
     ControlActionDef,
@@ -76,7 +77,8 @@ ENTITY_COLLECTIONS: dict[str, type[EntityBase]] = {
     "policy": Policy,
     "decision_point": DecisionPoint,
     "observation": Observation,
-    # экономика деятельности
+    # режимы работы и экономика деятельности
+    "calendar": Calendar,
     "economic_item": EconomicItem,
     # заготовки ниши (NOT IMPLEMENTED, см. dtb.domain.links)
     "link": Link,
@@ -99,6 +101,7 @@ _COLLECTION_FIELD = {
     "policy": "policies",
     "decision_point": "decision_points",
     "observation": "observations",
+    "calendar": "calendars",
     "economic_item": "economic_items",
     "link": "links",
     "gap_type": "gap_types",
@@ -106,7 +109,7 @@ _COLLECTION_FIELD = {
 
 #: Версия схемы модели. Увеличивается при добавлении коллекций и полей,
 #: требующих миграции сохранённых снимков (см. migrate_snapshot).
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class EnterpriseModel(BaseModel):
@@ -131,6 +134,8 @@ class EnterpriseModel(BaseModel):
     policies: dict[str, Policy] = Field(default_factory=dict)
     decision_points: dict[str, DecisionPoint] = Field(default_factory=dict)
     observations: dict[str, Observation] = Field(default_factory=dict)
+    # календари работы: смены, выходные, плановые остановки
+    calendars: dict[str, Calendar] = Field(default_factory=dict)
     # экономика деятельности (ставки, разовые начисления, остаточная стоимость)
     economic_items: dict[str, EconomicItem] = Field(default_factory=dict)
     economics: EconomicsSettings = Field(default_factory=EconomicsSettings)
@@ -219,6 +224,13 @@ def migrate_snapshot(data: dict[str, Any]) -> dict[str, Any]:
         data.setdefault("economic_items", {})
         data.setdefault("economics", {})
         data["schema_version"] = 3
+    if version < 4:
+        # v3 → v4: добавлены календари работы; дисциплина очереди и режим
+        # прерывания получают значения по умолчанию, совпадающие с прежним
+        # поведением (priority и resume), поэтому расчёт не меняется
+        data = dict(data)
+        data.setdefault("calendars", {})
+        data["schema_version"] = 4
     return data
 
 

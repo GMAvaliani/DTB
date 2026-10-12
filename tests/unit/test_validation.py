@@ -288,3 +288,36 @@ def test_economics_without_income_is_warning(small_model):
 def test_scenario_warmup_validated(small_model):
     bad = Scenario(id="s", name="s", enterprise_id="acme", warmup_hours=10_000.0)
     assert not validate_scenario(small_model, bad).ok_to_simulate
+
+
+# ------------------------------------------------- календари (фаза 5) --
+
+
+def test_unknown_resource_calendar_is_critical(small_model):
+    small_model.resources["line"].calendar_ref = "ghost"
+    assert not validate_model(small_model).ok_to_simulate
+
+
+def test_unknown_default_calendar_is_critical(small_model):
+    small_model.enterprise.default_calendar_ref = "ghost"
+    assert not validate_model(small_model).ok_to_simulate
+
+
+def test_calendar_without_shifts_is_info(small_model):
+    from dtb.domain.calendars import Calendar
+
+    small_model.calendars["always"] = Calendar(id="always", name="Круглосуточно")
+    report = validate_model(small_model)
+    assert any(i.code == "calendar_always_on" for i in report.issues)
+    assert report.ok_to_simulate
+
+
+def test_exception_beyond_horizon_is_warning(small_model):
+    from dtb.domain.calendars import Calendar, CalendarException
+
+    small_model.calendars["stop"] = Calendar(
+        id="stop", name="Остановка",
+        exceptions=[CalendarException(from_hour=10_000.0, to_hour=10_024.0)],
+    )
+    report = validate_model(small_model)
+    assert any(i.code == "exception_outside_horizon" for i in report.issues)

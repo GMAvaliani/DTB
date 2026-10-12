@@ -4,7 +4,11 @@
 Разделение начислений (референсная механика):
 
 * **ставка** — поток ₽/ч, который идёт всё время, пока держится состояние
-  (аренда ёмкости, оплата занятых ресурсов, хранение запаса);
+  (аренда ёмкости, оплата занятых ресурсов, хранение запаса). База
+  ``resource_capacity`` берёт номинальную ёмкость — она на балансе и
+  оплачивается независимо от смен (амортизация, аренда); база
+  ``resource_available`` берёт ёмкость, доступную по графику работы, — так
+  начисляется фонд оплаты труда по сменам;
 * **разовое** — начисление в момент события (завершение СЭД, выпуск единицы
   продукции, применение управляющего действия);
 * **остаточная стоимость** — оценка на конце горизонта (незавершённое
@@ -38,7 +42,8 @@ class EconomicBasis(str, Enum):
     """Чему пропорционально начисление."""
 
     CONSTANT = "constant"  # просто ставка в час (постоянные расходы)
-    RESOURCE_CAPACITY = "resource_capacity"  # × ёмкость ресурса
+    RESOURCE_CAPACITY = "resource_capacity"  # × номинальная ёмкость (на балансе)
+    RESOURCE_AVAILABLE = "resource_available"  # × доступная ёмкость по графику смен
     RESOURCE_BUSY = "resource_busy"  # × занятые единицы ресурса
     UTILITY_STOCK = "utility_stock"  # × запас полезности (хранение)
     WIP = "wip"  # × число СЭД в работе и в очереди
@@ -59,6 +64,7 @@ class EconomicDirection(str, Enum):
 RATE_BASES = {
     EconomicBasis.CONSTANT,
     EconomicBasis.RESOURCE_CAPACITY,
+    EconomicBasis.RESOURCE_AVAILABLE,
     EconomicBasis.RESOURCE_BUSY,
     EconomicBasis.UTILITY_STOCK,
     EconomicBasis.WIP,
@@ -77,6 +83,7 @@ EVENT_BASES = {
 #: Базы, требующие ссылки на сущность модели.
 REF_BASES = {
     EconomicBasis.RESOURCE_CAPACITY: "resource",
+    EconomicBasis.RESOURCE_AVAILABLE: "resource",
     EconomicBasis.RESOURCE_BUSY: "resource",
     EconomicBasis.UTILITY_STOCK: "utility_type",
     EconomicBasis.UTILITY_PRODUCED: "utility_type",

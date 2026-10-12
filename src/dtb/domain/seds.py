@@ -129,6 +129,31 @@ class ExternalModelRef(EntityBase):
     timeout_seconds: float = 30.0
 
 
+class InterruptionMode(str, Enum):
+    """Что происходит с экземпляром СЭД, прерванным на полпути.
+
+    Прерывание наступает, когда ёмкость ресурса упала (отказ оборудования,
+    конец смены, отмена управляющего действия) либо нарушено условие
+    продолжения.
+
+    * ``wait`` — наработка сохраняется, экземпляр ждёт возврата ресурса и
+      получает преимущество при его восстановлении (удерживает место в
+      очереди);
+    * ``resume`` — наработка сохраняется, экземпляр возвращается в общую
+      очередь и соперничает с остальными по действующей дисциплине
+      (поведение по умолчанию, совпадает с прежним);
+    * ``restart`` — наработка теряется: при повторном запуске длительность
+      сэмплируется заново;
+    * ``fail`` — экземпляр снимается и учитывается как отказ; потреблённые
+      входные полезности не возвращаются.
+    """
+
+    RESUME = "resume"
+    WAIT = "wait"
+    RESTART = "restart"
+    FAIL = "fail"
+
+
 class SEDDefinition(EntityBase):
     goal_id: str | None = None
     parent_id: str | None = None  # SED hierarchy, arbitrary depth
@@ -144,6 +169,8 @@ class SEDDefinition(EntityBase):
     continuation_condition: str | None = None  # checked at every МП while executing
     max_concurrent: int | None = Field(default=None, ge=1)
     priority: int = 100  # lower number starts first when competing for inputs
+    #: режим обработки прерывания (отказ ресурса, конец смены, условие)
+    interruption_mode: InterruptionMode = InterruptionMode.RESUME
     external_model: ExternalModelRef | None = None
     tags: list[str] = Field(default_factory=list)
 

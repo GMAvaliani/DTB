@@ -16,7 +16,7 @@ from dtb.domain.economics import REF_BASES, EconomicDirection
 from dtb.domain.events import EffectKind, StreamKind
 from dtb.domain.model import EnterpriseModel
 from dtb.domain.scenario import Scenario
-from dtb.domain.seds import DurationKind, TriggerKind
+from dtb.domain.seds import DurationKind, InterruptionMode, TriggerKind
 
 
 class Severity(str, Enum):
@@ -215,6 +215,9 @@ def validate_model(model: EnterpriseModel) -> ValidationReport:
     # --- контур управления ------------------------------------------------------
     _validate_control_loop(r, model)
 
+    # --- режимы работы: календари и дисциплины очередей -------------------------
+    _validate_calendars(r, model)
+
     # --- экономика --------------------------------------------------------------
     _validate_economics(r, model)
 
@@ -358,6 +361,37 @@ def _validate_control_loop(r: ValidationReport, model: EnterpriseModel) -> None:
         if obs.delay > 0 and obs.delay < obs.period:
             r.add(Severity.INFO, "observation_delay", "observation", obs.id,
                   "задержка меньше периода: оценка почти всегда актуальна")
+
+
+def _validate_calendars(r: ValidationReport, model: EnterpriseModel) -> None:
+    """Проверки графиков работы и ссылок на них."""
+    for calendar in model.calendars.values():
+        hours = sum(
+            (s.end_hour - s.start_hour) * (7 if s.day_of_week is None else 1)
+            for s in calendar.shifts
+        )
+        if calendar.shifts and hours <= 0:
+            r.add(Severity.CRITICAL, "empty_calendar", "calendar", calendar.id,
+                  "смены заданы, но суммарная длительность нулевая")
+        if calendar.enabled and not calendar.shifts and not calendar.exceptions:
+            r.add(Severity.INFO, "calendar_always_on", "calendar", calendar.id,
+                  "ни смен, ни исключений: ресурс доступен круглосуточно")
+        for exc in calendar.exceptions:
+            if exc.from_hour >= model.enterprise.planning_horizon_hours:
+                r.add(Severity.WARNING, "exception_outside_horizon", "calendar", calendar.id,
+                      f"исключение {exc.label or ''} начинается за горизонтом планирования")
+    default_ref = model.enterprise.default_calendar_ref
+    if default_ref and default_ref not in model.calendars:
+        r.add(Severity.CRITICAL, "broken_ref", "enterprise", model.enterprise.id,
+              f"календарь по умолчанию {default_ref!r} не существует")
+    for resource in model.resources.values():
+        if resource.calendar_ref and resource.calendar_ref not in model.calendars:
+            r.add(Severity.CRITICAL, "broken_ref", "resource", resource.id,
+                  f"календарь {resource.calendar_ref!r} не существует")
+    for sed in model.seds.values():
+        if sed.interruption_mode == InterruptionMode.RESTART and not sed.resources:
+            r.add(Severity.INFO, "restart_without_resources", "sed", sed.id,
+                  "режим restart осмыслен для СЭД, зависящих от ресурсов")
 
 
 def _validate_economics(r: ValidationReport, model: EnterpriseModel) -> None:

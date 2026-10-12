@@ -44,6 +44,7 @@ from dtb.domain import (
     UtilityKind,
     UtilityType,
 )
+from dtb.domain.calendars import Calendar, CalendarException, Shift
 from dtb.domain.economics import (
     EconomicBasis,
     EconomicDirection,
@@ -62,6 +63,8 @@ from dtb.domain.control import (
     Policy,
     Subject,
 )
+from dtb.domain.resources import QueueDiscipline
+from dtb.domain.seds import InterruptionMode
 from dtb.integration.base import sync_connector
 from dtb.integration.mock_erp import MockERPConnector
 
@@ -115,11 +118,14 @@ def build_demo_model() -> EnterpriseModel:
         m.org_units[oid] = OrgUnit(id=oid, name=name, kind=kind, parent_id=parent)
 
     # -- resources (View 6) -------------------------------------------------------
+    # ёмкости рассчитаны под сменный график (см. _add_calendars): в сутках
+    # работают не 24 часа, поэтому людей и оборудования нужно больше, чем при
+    # круглосуточной доступности
     resources = [
-        ("sales_team", "Менеджеры продаж", ResourceKind.PERSONNEL, 2, "чел", "ou_sales", 1200),
-        ("planners", "Планировщики", ResourceKind.PERSONNEL, 1, "чел", "ou_planning", 1100),
-        ("production_line", "Сборочные линии", ResourceKind.EQUIPMENT, 2, "линия", "ou_production", 3500),
-        ("qc_station", "Пост ОТК", ResourceKind.EQUIPMENT, 1, "пост", "ou_quality", 900),
+        ("sales_team", "Менеджеры продаж", ResourceKind.PERSONNEL, 3, "чел", "ou_sales", 1200),
+        ("planners", "Планировщики", ResourceKind.PERSONNEL, 2, "чел", "ou_planning", 1100),
+        ("production_line", "Сборочные линии", ResourceKind.EQUIPMENT, 4, "линия", "ou_production", 3500),
+        ("qc_station", "Пост ОТК", ResourceKind.EQUIPMENT, 2, "пост", "ou_quality", 900),
         ("warehouse_team", "Кладовщики", ResourceKind.PERSONNEL, 1, "чел", "ou_warehouse", 800),
         ("delivery_trucks", "Автопарк доставки", ResourceKind.VEHICLE, 2, "машина", "ou_logistics", 1500),
         ("trainers", "Наставники", ResourceKind.PERSONNEL, 1, "чел", "ou_hr", 1000),
@@ -370,6 +376,9 @@ def build_demo_model() -> EnterpriseModel:
         SeriesPoint(t=0, value=0),
     ]
 
+    # -- режимы работы: смены производства и логистики ---------------------------
+    _add_calendars(m)
+
     # -- контур управления: субъекты, действия, политики, МР, наблюдения ---------
     _add_control_loop(m)
 
@@ -379,6 +388,54 @@ def build_demo_model() -> EnterpriseModel:
     # -- ERP micro-level (views 4–7) through the real connector pipeline ----------
     sync_connector(m, MockERPConnector())
     return m
+
+
+def _add_calendars(m: EnterpriseModel) -> None:
+    """Графики работы «Демо-Завода»: две смены на сборке, день на складе.
+
+    Горизонт прогона начинается в понедельник (``calendar_start_weekday = 0``).
+    Сборка работает в две смены по будням с плановой остановкой на выходные,
+    ОТК и склад — в одну дневную смену, автопарк доступен круглосуточно.
+    Плановая остановка сборки на техобслуживание задана исключением.
+    """
+    m.enterprise.calendar_start_weekday = 0
+    m.enterprise.simulation_calendar = "2 смены × 5 дней"
+    m.calendars["two_shifts"] = Calendar(
+        id="two_shifts", name="Две смены, будни",
+        description="06:00–14:00 и 14:00–22:00 с понедельника по пятницу",
+        shifts=[
+            Shift(day_of_week=day, start_hour=start, end_hour=end, label=label)
+            for day in range(5)
+            for start, end, label in ((6.0, 14.0, "первая смена"), (14.0, 22.0, "вторая смена"))
+        ],
+        exceptions=[
+            CalendarException(
+                from_hour=336.0, to_hour=360.0, working=False,
+                label="плановое техобслуживание сборки",
+            )
+        ],
+    )
+    m.calendars["day_shift"] = Calendar(
+        id="day_shift", name="Дневная смена, будни",
+        description="08:00–17:00 с понедельника по пятницу",
+        shifts=[
+            Shift(day_of_week=day, start_hour=8.0, end_hour=17.0, label="день")
+            for day in range(5)
+        ],
+    )
+    m.resources["production_line"].calendar_ref = "two_shifts"
+    m.resources["qc_station"].calendar_ref = "day_shift"
+    m.resources["warehouse_team"].calendar_ref = "day_shift"
+    m.resources["planners"].calendar_ref = "day_shift"
+    m.resources["sales_team"].calendar_ref = "day_shift"
+    # дисциплины очередей: сборка по приоритету СЭД, ОТК — сначала короткие
+    m.resources["production_line"].queue_discipline = QueueDiscipline.PRIORITY
+    m.resources["qc_station"].queue_discipline = QueueDiscipline.SPT
+    m.resources["delivery_trucks"].queue_discipline = QueueDiscipline.FIFO
+    # прерывания: сборка продолжается после смены, ОТК начинает заново
+    m.seds["production"].interruption_mode = InterruptionMode.RESUME
+    m.seds["quality_control"].interruption_mode = InterruptionMode.RESTART
+    m.seds["delivery"].interruption_mode = InterruptionMode.WAIT
 
 
 def _add_economics(m: EnterpriseModel) -> None:
@@ -430,7 +487,8 @@ def _add_economics(m: EnterpriseModel) -> None:
         m.economic_items[f"payroll_{rid}"] = EconomicItem(
             id=f"payroll_{rid}", name=f"ФОТ: {m.resources[rid].name}",
             article="фонд оплаты труда",
-            kind=EconomicKind.RATE, basis=EconomicBasis.RESOURCE_CAPACITY, ref=rid,
+            description="Начисляется только в смены: база — доступная ёмкость",
+            kind=EconomicKind.RATE, basis=EconomicBasis.RESOURCE_AVAILABLE, ref=rid,
             rate=rate,
         )
     m.economic_items["revenue_money"] = EconomicItem(
@@ -531,7 +589,8 @@ def _add_control_loop(m: EnterpriseModel) -> None:
         term=336, min_authority_level=2, subject_ref="plant_manager",
     )
     m.control_actions["third_line"] = ControlActionDef(
-        id="third_line", name="Третья сборочная линия", loop=ControlLoop.DEVELOPMENT,
+        id="third_line", name="Дополнительная сборочная линия",
+        loop=ControlLoop.DEVELOPMENT,
         description="Инвестиция в постоянное расширение производственной мощности",
         goal_ref="g_root",
         effect=EventEffect(
@@ -559,7 +618,7 @@ def _add_control_loop(m: EnterpriseModel) -> None:
         cooldown_hours=336, priority=20,
     )
     m.policies["pol_invest"] = Policy(
-        id="pol_invest", name="Развитие: третья линия",
+        id="pol_invest", name="Развитие: дополнительная линия",
         description="Если линии устойчиво загружены и накоплены средства — инвестируем",
         loop=ControlLoop.DEVELOPMENT, subject_ref="ceo",
         state_selector=["utilization('production_line')", "stock('money')"],
@@ -634,12 +693,12 @@ def build_demo_scenarios() -> list[Scenario]:
         objective=ObjectiveSpec(kpi_id="revenue", target=2_000_000),
     )
     extra_line = Scenario(
-        id="demo_extra_line", name="Третья линия + рост спроса",
-        description="Инвестиция в третью сборочную линию при выросшем спросе",
+        id="demo_extra_line", name="Дополнительная линия + рост спроса",
+        description="Инвестиция в ещё одну сборочную линию при выросшем спросе",
         enterprise_id=DEMO_ID, base_scenario_id="demo_demand_growth",
         seed=DEMO_SEED, monte_carlo_runs=20,
         event_rate_multipliers={"customer_order": 1.4},
-        resource_capacity_overrides={"production_line": 3},
+        resource_capacity_overrides={"production_line": 5},
         objective=ObjectiveSpec(kpi_id="revenue", target=2_000_000),
     )
     failures = Scenario(

@@ -38,6 +38,7 @@ from dtb.domain.control import (
     Policy,
     PolicyRule,
 )
+from dtb.domain.calendars import Calendar
 from dtb.domain.economics import EconomicBasis, EconomicItem
 from dtb.domain.events import EffectKind, EventEffect, EventKind, StreamKind
 from dtb.domain.kpi import KPIDefinition
@@ -48,9 +49,11 @@ from dtb.domain.model import (
     apply_scenario_overrides,
 )
 from dtb.domain.scenario import Scenario
+from dtb.domain.resources import QueueDiscipline
 from dtb.domain.seds import (
     DurationKind,
     DurationModel,
+    InterruptionMode,
     SEDDefinition,
     SEDStatus,
     TriggerKind,
@@ -217,6 +220,22 @@ class SimulationEngine:
             "hours": self._warmup_hours,
             "applied": False,
         }
+        # --- режимы работы: календари, дисциплины очередей (фаза 5) ---
+        self._weekday_offset = int(self.model.enterprise.calendar_start_weekday)
+        self._default_discipline = QueueDiscipline(
+            self.model.enterprise.default_queue_discipline
+        )
+        self._resource_calendar: dict[str, Calendar] = {}
+        default_cal = self.model.calendars.get(
+            self.model.enterprise.default_calendar_ref or ""
+        )
+        for res in self.model.resources.values():
+            calendar = self.model.calendars.get(res.calendar_ref or "") or default_cal
+            if calendar is not None and calendar.enabled:
+                self._resource_calendar[res.id] = calendar
+        self._priority_wait: set[str] = set()  # экземпляры, ждущие возврата ресурса
+        self._restarted = 0
+        self._failed_instances = 0
         # trigger indexes
         self._on_event: dict[str, list[SEDDefinition]] = {}
         self._on_completed: dict[str, list[SEDDefinition]] = {}
@@ -266,7 +285,11 @@ class SimulationEngine:
         from dtb.simulation.state import ResourceState
 
         for res in self.model.resources.values():
-            self.state.resources[res.id] = ResourceState(res.id, res.capacity)
+            state = ResourceState(res.id, res.capacity)
+            calendar = self._resource_calendar.get(res.id)
+            if calendar is not None:
+                state.calendar_factor = calendar.factor_at(0.0, self._weekday_offset)
+            self.state.resources[res.id] = state
         for kind_id, kind in sorted(self.model.event_kinds.items()):
             sampler = build_sampler(
                 kind_id,
@@ -388,17 +411,82 @@ class SimulationEngine:
             return rng.expovariate(1.0 / mean) if mean > 0 else 0.0
         raise ValueError(f"unknown duration kind {d.kind}")  # pragma: no cover
 
+    def _apply_calendar(self, res_id: str) -> None:
+        """Пересчитать доступную ёмкость ресурса по его графику работы."""
+        calendar = self._resource_calendar.get(res_id)
+        res = self.state.resources.get(res_id)
+        if calendar is None or res is None:
+            return
+        factor = calendar.factor_at(self.state.time, self._weekday_offset)
+        if abs(factor - res.calendar_factor) <= _EPS:
+            return
+        previous = res.calendar_factor
+        res.calendar_factor = factor
+        self._log_entry(
+            "calendar_change", res_id, factor=factor, previous=previous,
+            capacity=res.capacity(self.state.time),
+        )
+
+    def _discipline_for(self, inst: SEDInstance) -> QueueDiscipline:
+        """Дисциплина очереди экземпляра: по первому требуемому ресурсу."""
+        sed = self.model.seds.get(inst.sed_id)
+        if sed is not None:
+            for req in sed.resources:
+                resource = self.model.resources.get(req.resource_id)
+                if resource is not None and resource.queue_discipline is not None:
+                    return resource.queue_discipline
+        return self._default_discipline
+
+    def _expected_duration(self, sed: SEDDefinition | None) -> float:
+        """Ожидаемая длительность СЭД — для дисциплины «сначала короткие»."""
+        if sed is None:
+            return 0.0
+        d = sed.duration
+        if d.kind == DurationKind.FIXED:
+            return float(d.value or 0.0)
+        if d.kind == DurationKind.UNIFORM:
+            return (float(d.low or 0.0) + float(d.high or 0.0)) / 2
+        if d.kind == DurationKind.TRIANGULAR:
+            return (
+                float(d.low or 0.0) + float(d.high or 0.0) + float(d.mode or 0.0)
+            ) / 3
+        if d.kind in (DurationKind.NORMAL, DurationKind.EXPONENTIAL):
+            return float(d.mean or 0.0)
+        if d.kind == DurationKind.LOGNORMAL:
+            import math as _math
+
+            return _math.exp(float(d.mean or 0.0) + float(d.std or 0.0) ** 2 / 2)
+        return 0.0
+
+    def _queue_sort_key(self, inst: SEDInstance) -> tuple:
+        """Ключ сортировки очереди по действующей дисциплине.
+
+        Экземпляры в режиме ``wait`` (ждут возврата прерванного ресурса)
+        получают преимущество: они удерживают место в очереди.
+        """
+        sed = self.model.seds.get(inst.sed_id)
+        held = 0 if inst.instance_id in self._priority_wait else 1
+        discipline = self._discipline_for(inst)
+        if discipline == QueueDiscipline.FIFO:
+            return (held, inst.created_at, inst.seq)
+        if discipline == QueueDiscipline.LIFO:
+            return (held, -inst.created_at, -inst.seq)
+        if discipline == QueueDiscipline.SPT:
+            remaining = (
+                inst.remaining_duration
+                if inst.remaining_duration is not None
+                else self._expected_duration(sed)
+            )
+            return (held, remaining, inst.seq)
+        priority = sed.priority if sed is not None else 10**9
+        return (held, priority, inst.seq)
+
     def _try_start_waiting(self) -> None:
         t = self.state.time
         progress = True
         while progress:
             progress = False
-            order = sorted(
-                self.state.waiting,
-                key=lambda i: (self.model.seds[i.sed_id].priority, i.seq)
-                if i.sed_id in self.model.seds
-                else (10**9, i.seq),
-            )
+            order = sorted(self.state.waiting, key=self._queue_sort_key)
             for inst in order:
                 sed = self.model.seds.get(inst.sed_id)
                 if sed is None:
@@ -462,6 +550,7 @@ class SimulationEngine:
         inst.block_reason = None
         self.state.waiting.remove(inst)
         self.state.executing[inst.instance_id] = inst
+        self._priority_wait.discard(inst.instance_id)
         if not resumed:
             self.state.started_count[sed.id] = self.state.started_count.get(sed.id, 0) + 1
             self.economics.on_event(EconomicBasis.SED_STARTED, sed.id, 1.0, t)
@@ -593,22 +682,63 @@ class SimulationEngine:
                 if not self._condition_ok(sed.continuation_condition, inst.payload):
                     self._suspend_instance(inst, "continuation_condition")
 
-    def _suspend_instance(self, inst: SEDInstance, reason: str) -> None:
-        t = self.state.time
-        inst.remaining_duration = max(0.0, (inst.completion_time or t) - t)
-        inst.completion_time = None
+    def _release_resources(self, inst: SEDInstance) -> None:
         for res_id, qty in inst.allocated.items():
             res = self.state.resources.get(res_id)
             if res:
                 res.allocated = max(0.0, res.allocated - qty)
         inst.allocated = {}
+
+    def _suspend_instance(self, inst: SEDInstance, reason: str) -> None:
+        """Обработать прерывание экземпляра согласно режиму его СЭД.
+
+        ``resume`` — остаток длительности сохраняется, экземпляр возвращается в
+        общую очередь; ``wait`` — то же, но экземпляр удерживает место в
+        очереди и получает преимущество при возврате ресурса; ``restart`` —
+        наработка теряется и длительность будет сэмплирована заново; ``fail`` —
+        экземпляр снимается как отказ.
+        """
+        t = self.state.time
+        sed = self.model.seds.get(inst.sed_id)
+        mode = sed.interruption_mode if sed is not None else InterruptionMode.RESUME
+        elapsed = max(0.0, t - (inst.started_at or t))
+        remaining = max(0.0, (inst.completion_time or t) - t)
+        inst.completion_time = None
+        self._release_resources(inst)
+        del self.state.executing[inst.instance_id]
+
+        if mode == InterruptionMode.FAIL:
+            inst.status = SEDStatus.FAILED
+            inst.remaining_duration = None
+            inst.block_reason = reason
+            self.state.failed_count[inst.sed_id] = (
+                self.state.failed_count.get(inst.sed_id, 0) + 1
+            )
+            self._failed_instances += 1
+            self._priority_wait.discard(inst.instance_id)
+            self._log_entry(
+                "sed_failed", inst.sed_id, instance=inst.instance_id, reason=reason,
+                mode=mode.value, elapsed=round(elapsed, 6),
+            )
+            return
+
+        if mode == InterruptionMode.RESTART:
+            inst.remaining_duration = None  # длительность будет сэмплирована заново
+            inst.started_at = None
+            self._restarted += 1
+        else:
+            inst.remaining_duration = remaining
         inst.status = SEDStatus.WAITING
         inst.suspend_count += 1
         inst.waiting_since = t
         inst.block_reason = reason
-        del self.state.executing[inst.instance_id]
         self.state.waiting.append(inst)
-        self._log_entry("sed_suspended", inst.sed_id, instance=inst.instance_id, reason=reason)
+        if mode == InterruptionMode.WAIT:
+            self._priority_wait.add(inst.instance_id)
+        self._log_entry(
+            "sed_suspended", inst.sed_id, instance=inst.instance_id, reason=reason,
+            mode=mode.value, lost_progress=round(elapsed, 6) if mode == InterruptionMode.RESTART else 0.0,
+        )
 
     # -------------------------------------------- наблюдения и контур решений --
 
@@ -1112,6 +1242,10 @@ class SimulationEngine:
         timer_t = self.decisions.next_timer_time(now)
         if timer_t is not None:
             out.append((timer_t, 6, "decision_timer", ("decision_timer", None)))
+        for res_id, calendar in sorted(self._resource_calendar.items()):
+            change = calendar.next_change(now, self.horizon, self._weekday_offset)
+            if change is not None:
+                out.append((change, 0, f"cal:{res_id}", ("calendar", res_id)))
         if self._warmup_hours and not self._warmup_report["applied"]:
             out.append((self._warmup_hours, -1, "warmup", ("warmup", None)))
         for pending in self._pending_activations:
@@ -1258,6 +1392,8 @@ class SimulationEngine:
                         "warning", "revert_failed", action=reversion.action_id,
                         error=str(exc),
                     )
+        elif kind == "calendar":
+            self._apply_calendar(ref)
         elif kind == "warmup":
             if not self._warmup_report["applied"]:
                 self._apply_warmup()
@@ -1334,6 +1470,7 @@ class SimulationEngine:
                 "started": self.state.started_count.get(sed_id, 0),
                 "completed": self.state.completed_count.get(sed_id, 0),
                 "cancelled": self.state.cancelled_count.get(sed_id, 0),
+                "failed": self.state.failed_count.get(sed_id, 0),
                 "suspensions": suspend_totals.get(sed_id, 0),
                 "waiting_hours": round(waiting_totals.get(sed_id, 0.0), 4),
                 "queue_peak": self.state.queue_peak.get(sed_id, 0),
@@ -1359,6 +1496,9 @@ class SimulationEngine:
                 "capacity_hours": round(res.capacity_integral, 4),
                 "peak_allocated": res.peak_allocated,
                 "final_capacity": res.capacity(self.state.time),
+                "nominal_capacity": res.nominal_capacity(self.state.time),
+                "off_shift_hours": round(res.off_shift_hours, 4),
+                "calendar_factor": res.calendar_factor,
             }
         for utype_id in sorted(
             set(self.model.utility_types)
@@ -1388,6 +1528,8 @@ class SimulationEngine:
                 if self.observations.mode_override
                 else "per_observation"
             ),
+            "sed_restarts": self._restarted,
+            "sed_failures": self._failed_instances,
             "rejected_actions": len(self._rejected_actions),
             "control_cost_total": result.control_costs.get("total", 0.0),
             "measured_hours": round(max(0.0, self.state.time - self.state.stat_start_time), 6),
@@ -1410,6 +1552,11 @@ class SimulationEngine:
         if basis == EconomicBasis.CONSTANT:
             return 1.0
         if basis == EconomicBasis.RESOURCE_CAPACITY:
+            # номинальная ёмкость: платится независимо от графика смен
+            res = st.resources.get(item.ref or "")
+            return res.nominal_capacity(st.time) if res else 0.0
+        if basis == EconomicBasis.RESOURCE_AVAILABLE:
+            # доступная по календарю ёмкость: ФОТ по сменам
             res = st.resources.get(item.ref or "")
             return res.capacity(st.time) if res else 0.0
         if basis == EconomicBasis.RESOURCE_BUSY:
