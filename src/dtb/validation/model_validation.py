@@ -238,10 +238,21 @@ def _validate_control_loop(r: ValidationReport, model: EnterpriseModel) -> None:
         "kpi": model.kpis,
     }
 
+    acting_subjects = {a.subject_ref for a in actions.values() if a.subject_ref}
+    acting_subjects |= {p.subject_ref for p in policies.values() if p.subject_ref}
+
     for subject in subjects.values():
         if subject.org_unit_ref and subject.org_unit_ref not in model.org_units:
             r.add(Severity.WARNING, "broken_ref", "subject", subject.id,
                   f"орг-единица {subject.org_unit_ref!r} не существует")
+        if subject.id in acting_subjects and subject.role_ref == "viewer":
+            r.add(Severity.WARNING, "rbac_mismatch", "subject", subject.id,
+                  "субъект применяет управляющие действия, но его роль RBAC — "
+                  "viewer: нужна роль editor или admin")
+        if subject.id in acting_subjects and subject.authority_level == 0:
+            r.add(Severity.WARNING, "no_authority", "subject", subject.id,
+                  "нулевой уровень полномочий: действия с требованием полномочий "
+                  "будут отклонены")
 
     for action in actions.values():
         effect = action.effect
@@ -269,6 +280,25 @@ def _validate_control_loop(r: ValidationReport, model: EnterpriseModel) -> None:
                 r.add(Severity.WARNING, "insufficient_authority", "control_action", action.id,
                       f"полномочий субъекта {action.subject_ref!r} ({level}) не хватает "
                       f"для действия (нужно {action.min_authority_level})")
+        if action.min_authority_level > 0 and not action.subject_ref:
+            holders = [
+                p.id for p in policies.values()
+                if p.subject_ref and any(
+                    rule.action_ref == action.id for rule in p.effective_rules()
+                )
+            ]
+            if not holders:
+                r.add(Severity.WARNING, "no_subject", "control_action", action.id,
+                      "действие требует полномочий, но субъект не задан ни у него, "
+                      "ни у вызывающей политики — применение будет отклонено")
+        if not action.reversible and action.term is not None:
+            r.add(Severity.WARNING, "irreversible_term", "control_action", action.id,
+                  "необратимое действие с конечным сроком: срок не применяется, "
+                  "эффект остаётся бессрочным")
+        if action.activation_delay and action.term and action.activation_delay >= action.term:
+            r.add(Severity.WARNING, "delay_exceeds_term", "control_action", action.id,
+                  "задержка активации не меньше срока действия: эффект не успеет "
+                  "проявиться")
 
     for policy in policies.values():
         for rule in policy.effective_rules():
@@ -349,6 +379,10 @@ def validate_scenario(model: EnterpriseModel, scenario: Scenario) -> ValidationR
             r.add(Severity.CRITICAL, "broken_ref", "scenario", scenario.id,
                   f"вброшенное событие несуществующего вида {ev.event_kind_id!r}")
     for action in scenario.control_actions:
+        if action.subject_ref and action.subject_ref not in model.subjects:
+            r.add(Severity.CRITICAL, "broken_ref", "scenario", scenario.id,
+                  f"сценарное действие ссылается на несуществующего "
+                  f"субъекта {action.subject_ref!r}")
         if action.action_ref and action.action_ref not in model.control_actions:
             r.add(Severity.CRITICAL, "broken_ref", "scenario", scenario.id,
                   f"сценарное действие ссылается на несуществующее "

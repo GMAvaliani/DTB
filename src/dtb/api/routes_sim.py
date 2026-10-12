@@ -398,6 +398,28 @@ def simulation_policy_trace(
     }
 
 
+@router.get("/simulations/{sim_id}/rejected-actions", dependencies=[VIEW])
+def simulation_rejected_actions(request: Request, sim_id: str) -> dict[str, Any]:
+    """Действия, отклонённые из-за полномочий субъекта или отсутствия субъекта."""
+    record = _record_or_404(ctx(request), sim_id)
+    result = _sample_result(record)
+    by_reason: dict[str, int] = {}
+    for entry in result.rejected_actions:
+        reason = entry.get("reason", "unknown")
+        by_reason[reason] = by_reason.get(reason, 0) + 1
+    failed = [
+        {"t": e["t"], "action": e["name"], **e.get("details", {})}
+        for e in result.event_log
+        if e.get("type") == "control_action_failed"
+    ]
+    return {
+        "rejected_actions": result.rejected_actions,
+        "by_reason": by_reason,
+        "failed_actions": failed,
+        "control_costs": result.control_costs,
+    }
+
+
 @router.get("/simulations/{sim_id}/observation-error", dependencies=[VIEW])
 def simulation_observation_error(request: Request, sim_id: str) -> dict[str, Any]:
     """Погрешность наблюдения по компонентам состояния: |Y − Ŷ| за прогон."""

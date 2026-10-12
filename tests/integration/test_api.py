@@ -242,3 +242,27 @@ def test_twin_versus_pure_observation_difference(client):
     assert pure["observations"]["obs_prod_queue"]["mean_abs_error"] == 0
     compare = client.get(f"/api/simulations/compare?ids={ids[0]},{ids[1]}").json()
     assert compare
+
+
+def test_rejected_actions_endpoint(client):
+    """Фаза 2: отклонённые по полномочиям действия и стоимость управления в API."""
+    client.post("/api/demo")
+    # поднимаем требование полномочий выше уровня начальника смены
+    action = client.get(
+        "/api/enterprises/demo_plant/entities/control_action/overtime_shift"
+    ).json()
+    action["min_authority_level"] = 5
+    assert client.post(
+        "/api/enterprises/demo_plant/entities/control_action", json=action
+    ).status_code == 200
+    sim_id = client.post("/api/simulations", json={
+        "scenario_id": "demo_baseline", "kind": "single", "seed": 20250819
+    }).json()["id"]
+    assert wait_done(client, sim_id) == "completed"
+    body = client.get(f"/api/simulations/{sim_id}/rejected-actions").json()
+    assert body["by_reason"]["insufficient_authority"] > 0
+    assert all(e["action"] == "overtime_shift" for e in body["rejected_actions"])
+    costs = body["control_costs"]
+    assert costs["total"] > 0
+    assert "overtime_shift" not in costs["by_action"]  # отклонённое не стоит ничего
+    assert set(costs["by_loop"]) <= {"regulation", "organization", "development"}

@@ -40,7 +40,12 @@ from dtb.domain.control import (
 )
 from dtb.domain.events import EffectKind, EventEffect, EventKind, StreamKind
 from dtb.domain.kpi import KPIDefinition
-from dtb.domain.model import EnterpriseModel, apply_scenario_overrides, _apply_parameter
+from dtb.domain.model import (
+    EnterpriseModel,
+    _apply_parameter,
+    _read_parameter,
+    apply_scenario_overrides,
+)
 from dtb.domain.scenario import Scenario
 from dtb.domain.seds import (
     DurationKind,
@@ -57,6 +62,41 @@ from dtb.simulation.state import SEDInstance, SimulationState
 from dtb.simulation.streams import InjectedSampler, PoissonSampler, StreamSampler, build_sampler
 
 _EPS = 1e-9
+
+
+@dataclass
+class _PendingActivation:
+    """Решение принято, эффект ещё не наступил (задержка активации)."""
+
+    time: float
+    seq: int
+    action_id: str
+    effect: EventEffect
+    source: str
+    policy_id: str | None
+    subject_id: str | None
+
+
+@dataclass
+class _PendingReversion:
+    """Срок обратимого действия истёк — эффект откатывается."""
+
+    time: float
+    seq: int
+    action_id: str
+    parameter_path: str
+    previous_value: Any
+
+
+@dataclass
+class _CostWindow:
+    """Интервал, на котором действует повременная стоимость действия."""
+
+    action_id: str
+    loop: str
+    rate: float
+    start: float
+    end: float | None
 
 
 @dataclass
@@ -160,6 +200,17 @@ class SimulationEngine:
         self._n_decisions = 0
         self._last_decision_time = 0.0
         self._applied_by_policy_at: set[tuple[float, str]] = set()
+        # --- управляющее действие как объект (фаза 2) ---
+        self._action_rng = {
+            aid: substream(self.seed, "control_action", aid)
+            for aid in sorted(self.model.control_actions)
+        }
+        self._pending_activations: list[_PendingActivation] = []
+        self._pending_reversions: list[_PendingReversion] = []
+        self._action_seq = 0
+        self._rejected_actions: list[dict[str, Any]] = []
+        self._cost_windows: list[_CostWindow] = []
+        self._one_time_costs: list[dict[str, Any]] = []
         # trigger indexes
         self._on_event: dict[str, list[SEDDefinition]] = {}
         self._on_completed: dict[str, list[SEDDefinition]] = {}
@@ -710,7 +761,7 @@ class SimulationEngine:
                     policy=policy,
                 )
                 entry["outcome"] = outcome
-                if outcome == "applied":
+                if outcome in ("applied", "scheduled"):
                     applied += 1
                     if policy.cooldown_hours:
                         self._policy_cooldown[policy.id] = (
@@ -732,30 +783,170 @@ class SimulationEngine:
             updated.quantity_expression = repr(float(magnitude))
         return updated
 
+    def _resolve_subject(
+        self, action: ControlActionDef, policy: Policy | None, subject_ref: str | None
+    ) -> tuple[str | None, int]:
+        """Кто применяет действие и каков его уровень полномочий.
+
+        Приоритет: субъект вызова (сценарий) → субъект политики → субъект,
+        заданный у самого действия.
+        """
+        for candidate in (subject_ref, policy.subject_ref if policy else None,
+                          action.subject_ref):
+            if candidate:
+                subject = self.model.subjects.get(candidate)
+                return candidate, (subject.authority_level if subject else -1)
+        return None, 0
+
+    def _reject_action(
+        self, action_id: str, reason: str, source: str, **details: Any
+    ) -> str:
+        """Зафиксировать отклонённое действие: оно не применяется."""
+        entry = {
+            "t": round(self.state.time, 6),
+            "action": action_id,
+            "reason": reason,
+            "source": source,
+            **details,
+        }
+        self._rejected_actions.append(entry)
+        self._log_entry("control_action_rejected", action_id, reason=reason, source=source,
+                        **details)
+        return "rejected"
+
     def _apply_control_action(
         self,
         action_ref: str | None,
         source: str,
         magnitude: float | None = None,
         policy: Policy | None = None,
+        subject_ref: str | None = None,
     ) -> str:
-        """Применить каталожное управляющее действие. Возвращает исход."""
+        """Применить каталожное управляющее действие.
+
+        Порядок проверок: полномочия субъекта → розыгрыш успеха → задержка
+        активации. Возвращает исход: ``applied``, ``scheduled``, ``failed``,
+        ``rejected``, ``unknown_action`` или ``no_action``.
+        """
         if not action_ref:
             return "no_action"
         action = self.model.control_actions.get(action_ref)
         if action is None:
             self._log_entry("warning", "unknown_control_action", action=action_ref, source=source)
             return "unknown_action"
+
+        subject_id, level = self._resolve_subject(action, policy, subject_ref)
+        if subject_id is not None and level < 0:
+            return self._reject_action(
+                action_ref, "unknown_subject", source, subject=subject_id
+            )
+        if action.min_authority_level > 0:
+            if subject_id is None:
+                return self._reject_action(
+                    action_ref, "no_subject", source,
+                    required_authority=action.min_authority_level,
+                )
+            if level < action.min_authority_level:
+                return self._reject_action(
+                    action_ref, "insufficient_authority", source, subject=subject_id,
+                    authority_level=level, required_authority=action.min_authority_level,
+                )
+
+        # разовая стоимость списывается за попытку, в том числе неудачную
+        if action.one_time_cost:
+            self._one_time_costs.append(
+                {
+                    "t": round(self.state.time, 6),
+                    "action": action_ref,
+                    "loop": action.loop.value if action.loop else "",
+                    "amount": action.one_time_cost,
+                }
+            )
+
+        if action.success_probability < 1.0:
+            draw = self._action_rng[action_ref].random()
+            if draw > action.success_probability:
+                self._log_entry(
+                    "control_action_failed", action_ref, source=source,
+                    probability=action.success_probability,
+                    subject=subject_id,
+                    policy=policy.id if policy else None,
+                )
+                return "failed"
+
         effect = self._effect_with_magnitude(
             action.effect, magnitude if magnitude is not None else action.magnitude
         )
-        self._apply_effect(effect, {}, source)
         self._applied_by_policy_at.add((round(self.state.time, 6), action_ref))
-        self._log_entry(
-            "control_action_applied", action_ref, source=source,
-            policy=policy.id if policy else None,
-        )
+        if action.activation_delay > 0:
+            self._action_seq += 1
+            self._pending_activations.append(
+                _PendingActivation(
+                    time=self.state.time + action.activation_delay,
+                    seq=self._action_seq,
+                    action_id=action_ref,
+                    effect=effect,
+                    source=source,
+                    policy_id=policy.id if policy else None,
+                    subject_id=subject_id,
+                )
+            )
+            self._log_entry(
+                "control_action_scheduled", action_ref, source=source,
+                activates_at=round(self.state.time + action.activation_delay, 6),
+                subject=subject_id, policy=policy.id if policy else None,
+            )
+            return "scheduled"
+
+        self._activate_action(action, effect, source, policy.id if policy else None, subject_id)
         return "applied"
+
+    def _activate_action(
+        self,
+        action: ControlActionDef,
+        effect: EventEffect,
+        source: str,
+        policy_id: str | None,
+        subject_id: str | None,
+    ) -> None:
+        """Ввести эффект действия в силу: срок, откат, повременная стоимость."""
+        t = self.state.time
+        term = action.term if action.reversible else None
+        applied = effect
+        if (
+            term
+            and effect.kind == EffectKind.RESOURCE_CAPACITY_DELTA
+            and not effect.duration
+        ):
+            applied = effect.model_copy(deep=True)
+            applied.duration = term
+        previous_value = None
+        if term and effect.kind == EffectKind.SET_PARAMETER and effect.parameter_path:
+            previous_value = _read_parameter(self.model, effect.parameter_path)
+        self._apply_effect(applied, {}, source)
+        if term and effect.kind == EffectKind.SET_PARAMETER and effect.parameter_path:
+            self._action_seq += 1
+            self._pending_reversions.append(
+                _PendingReversion(
+                    time=t + term, seq=self._action_seq, action_id=action.id,
+                    parameter_path=effect.parameter_path, previous_value=previous_value,
+                )
+            )
+        if action.recurring_cost:
+            self._cost_windows.append(
+                _CostWindow(
+                    action_id=action.id,
+                    loop=action.loop.value if action.loop else "",
+                    rate=action.recurring_cost,
+                    start=t,
+                    end=(t + term) if term else None,
+                )
+            )
+        self._log_entry(
+            "control_action_applied", action.id, source=source, policy=policy_id,
+            subject=subject_id, loop=action.loop.value if action.loop else None,
+            term=term, reversible=action.reversible,
+        )
 
     # ------------------------------------------------------------------ effects --
 
@@ -908,6 +1099,14 @@ class SimulationEngine:
         timer_t = self.decisions.next_timer_time(now)
         if timer_t is not None:
             out.append((timer_t, 6, "decision_timer", ("decision_timer", None)))
+        for pending in self._pending_activations:
+            out.append(
+                (pending.time, 7, f"{pending.seq:012d}", ("activation", pending.seq))
+            )
+        for reversion in self._pending_reversions:
+            out.append(
+                (reversion.time, 8, f"{reversion.seq:012d}", ("reversion", reversion.seq))
+            )
         return out
 
     def _loop(self) -> str:
@@ -1005,10 +1204,45 @@ class SimulationEngine:
                     )
                 elif action.action_ref:
                     self._log_entry("control_action", action.label or action.action_ref)
-                    self._apply_control_action(action.action_ref, source="scenario")
+                    self._apply_control_action(
+                        action.action_ref, source="scenario",
+                        subject_ref=action.subject_ref,
+                    )
                 elif action.effect is not None:
                     self._log_entry("control_action", action.label or action.effect.kind.value)
                     self._apply_effect(action.effect, {}, "control")
+        elif kind == "activation":
+            pending = next(
+                (x for x in self._pending_activations if x.seq == ref), None
+            )
+            if pending is not None and pending.time <= self.state.time + _EPS:
+                self._pending_activations.remove(pending)
+                action = self.model.control_actions.get(pending.action_id)
+                if action is not None:
+                    self._activate_action(
+                        action, pending.effect, pending.source, pending.policy_id,
+                        pending.subject_id,
+                    )
+        elif kind == "reversion":
+            reversion = next(
+                (x for x in self._pending_reversions if x.seq == ref), None
+            )
+            if reversion is not None and reversion.time <= self.state.time + _EPS:
+                self._pending_reversions.remove(reversion)
+                try:
+                    _apply_parameter(
+                        self.model, reversion.parameter_path, reversion.previous_value
+                    )
+                    self._after_parameter_change(reversion.parameter_path)
+                    self._log_entry(
+                        "control_action_reverted", reversion.action_id,
+                        path=reversion.parameter_path, value=reversion.previous_value,
+                    )
+                except (KeyError, AttributeError, ValueError) as exc:
+                    self._log_entry(
+                        "warning", "revert_failed", action=reversion.action_id,
+                        error=str(exc),
+                    )
         elif kind == "obs_sample":
             self.observations.take_samples(self.state.time, self._observation_true_value)
         elif kind == "decision_timer":
@@ -1048,6 +1282,8 @@ class SimulationEngine:
         result.decision_log = self._decision_log
         result.policy_trace = self._policy_trace
         result.observation_error = self.observations.error_report()
+        result.rejected_actions = self._rejected_actions
+        result.control_costs = self._control_cost_report()
         result.final_stocks = {k: round(v, 6) for k, v in self.state.stocks.items()}
         context = self.state.kpi_context()
         for kid, expr in self._kpi_exprs.items():
@@ -1117,6 +1353,50 @@ class SimulationEngine:
                 if self.observations.mode_override
                 else "per_observation"
             ),
+            "rejected_actions": len(self._rejected_actions),
+            "control_cost_total": result.control_costs.get("total", 0.0),
+        }
+
+    def _control_cost_report(self) -> dict[str, Any]:
+        """Стоимость управления: разовая за попытки + повременная за часы действия."""
+        by_action: dict[str, dict[str, float]] = {}
+        by_loop: dict[str, float] = {}
+
+        def bucket(action_id: str, loop: str) -> dict[str, float]:
+            return by_action.setdefault(
+                action_id,
+                {"one_time": 0.0, "recurring": 0.0, "total": 0.0, "attempts": 0.0,
+                 "loop": loop},  # type: ignore[dict-item]
+            )
+
+        one_time_total = 0.0
+        for entry in self._one_time_costs:
+            data = bucket(entry["action"], entry["loop"])
+            data["one_time"] += entry["amount"]
+            data["attempts"] += 1
+            one_time_total += entry["amount"]
+            by_loop[entry["loop"]] = by_loop.get(entry["loop"], 0.0) + entry["amount"]
+
+        recurring_total = 0.0
+        end_of_run = self.state.time
+        for window in self._cost_windows:
+            stop = min(window.end if window.end is not None else end_of_run, end_of_run)
+            hours = max(0.0, stop - window.start)
+            amount = hours * window.rate
+            data = bucket(window.action_id, window.loop)
+            data["recurring"] += amount
+            recurring_total += amount
+            by_loop[window.loop] = by_loop.get(window.loop, 0.0) + amount
+        for data in by_action.values():
+            data["total"] = round(data["one_time"] + data["recurring"], 6)
+            data["one_time"] = round(data["one_time"], 6)
+            data["recurring"] = round(data["recurring"], 6)
+        return {
+            "one_time": round(one_time_total, 6),
+            "recurring": round(recurring_total, 6),
+            "total": round(one_time_total + recurring_total, 6),
+            "by_action": by_action,
+            "by_loop": {k: round(v, 6) for k, v in sorted(by_loop.items())},
         }
 
     def _goal_achievement(self, result: SimulationResult) -> dict[str, dict[str, Any]]:

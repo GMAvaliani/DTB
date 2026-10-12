@@ -37,6 +37,7 @@ class ControlAction(EntityBase):
     time: float = Field(ge=0)
     effect: EventEffect | None = None
     action_ref: str | None = None
+    subject_ref: str | None = None  # кто применяет: проверяются полномочия
     label: str = ""
 
     @model_validator(mode="after")

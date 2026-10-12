@@ -18,10 +18,17 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from dtb.domain.base import EntityBase
 from dtb.domain.events import EventEffect
+
+#: Роли RBAC платформы: субъект модели сопоставляется с ними через ``role_ref``.
+RBAC_ROLES = ("viewer", "editor", "admin")
+
+#: Минимальная роль RBAC, позволяющая применять управляющее действие.
+ACTING_ROLES = ("editor", "admin")
+
 
 # --------------------------------------------------------------------- субъект --
 
@@ -38,6 +45,16 @@ class Subject(EntityBase):
     role_ref: str | None = None  # соответствие роли RBAC: viewer | editor | admin
     external: bool = False
 
+    @field_validator("role_ref")
+    @classmethod
+    def _known_role(cls, value: str | None) -> str | None:
+        """Роль субъекта совпадает с ролями RBAC платформы."""
+        if value in (None, "", *RBAC_ROLES):
+            return value or None
+        raise ValueError(
+            f"роль {value!r} неизвестна: допустимы {', '.join(RBAC_ROLES)}"
+        )
+
 
 # ------------------------------------------------------- управляющее действие --
 
@@ -46,8 +63,18 @@ class ControlActionDef(EntityBase):
     """Управляющее действие как объект каталога модели.
 
     Сценарий может применить его по времени, политика — по состоянию.
-    Поля стоимости, задержки, срока, обратимости и вероятности успеха
-    задействуются движком (фаза 2), экономика начисляется по правилам фазы 3.
+
+    Движок учитывает:
+
+    * ``activation_delay`` — решение принято сейчас, эффект наступает позже;
+    * ``term`` — срок действия обратимого эффекта (по истечении откатывается);
+    * ``reversible=False`` — эффект необратим и остаётся навсегда, срок к нему
+      не применяется;
+    * ``success_probability`` — действие может не состояться; розыгрыш берётся
+      из SHA-256-субпотока ``(seed, "control_action", id)``;
+    * ``min_authority_level`` — действие вне полномочий субъекта отклоняется;
+    * ``one_time_cost`` — списывается за попытку (в том числе неудачную),
+      ``recurring_cost`` — за часы, когда эффект действовал.
     """
 
     loop: "ControlLoop | None" = None  # к какому контуру относится действие

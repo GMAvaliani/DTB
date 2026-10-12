@@ -254,6 +254,21 @@ def apply_scenario_overrides(model: EnterpriseModel, scenario: Scenario) -> Ente
     return m
 
 
+def _read_parameter(model: EnterpriseModel, path: str) -> Any:
+    """Текущее значение по пути параметра (для отката обратимого действия)."""
+    if ":" in path:
+        etype, rest = path.split(":", 1)
+        entity_id, _, field = rest.partition(".")
+        entity = model.get_entity(etype, entity_id)
+        if entity is None or not field:
+            raise KeyError(f"parameter path {path!r}: entity not found")
+        target: Any = entity
+        for part in field.split("."):
+            target = getattr(target, part)
+        return target
+    return getattr(model.enterprise, path)
+
+
 def _apply_parameter(model: EnterpriseModel, path: str, value: Any) -> None:
     if ":" in path:
         etype, rest = path.split(":", 1)

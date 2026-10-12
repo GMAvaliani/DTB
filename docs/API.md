@@ -91,6 +91,8 @@ GET  /simulations/{id}/bottlenecks
 GET  /simulations/{id}/decisions            журнал МР: триггеры + интервал
 GET  /simulations/{id}/policy-trace[?policy_id=]  вызовы политик по контурам
 GET  /simulations/{id}/observation-error    |Y − Ŷ| по компонентам состояния
+GET  /simulations/{id}/rejected-actions     отклонённые и неудавшиеся действия
+                                            + стоимость управления по контурам
 GET  /simulations/{id}/stream      SSE-прогресс (text/event-stream)
 GET  /simulations/compare?ids=a,b  сравнение (первый — baseline)
 ```

@@ -43,6 +43,7 @@ class SimulationResult:
     policy_trace: list[dict[str, Any]] = field(default_factory=list)
     observation_error: dict[str, Any] = field(default_factory=dict)
     rejected_actions: list[dict[str, Any]] = field(default_factory=list)
+    control_costs: dict[str, Any] = field(default_factory=dict)
     sed_stats: dict[str, dict[str, Any]] = field(default_factory=dict)
     resource_stats: dict[str, dict[str, Any]] = field(default_factory=dict)
     utility_totals: dict[str, dict[str, float]] = field(default_factory=dict)
@@ -67,6 +68,7 @@ class SimulationResult:
             "policy_trace": self.policy_trace,
             "observation_error": self.observation_error,
             "rejected_actions": self.rejected_actions,
+            "control_costs": self.control_costs,
             "sed_stats": self.sed_stats,
             "resource_stats": self.resource_stats,
             "utility_totals": self.utility_totals,
@@ -109,6 +111,7 @@ class SimulationResult:
         result.policy_trace = data.get("policy_trace", [])
         result.observation_error = data.get("observation_error", {})
         result.rejected_actions = data.get("rejected_actions", [])
+        result.control_costs = data.get("control_costs", {})
         result.sed_stats = data.get("sed_stats", {})
         result.resource_stats = data.get("resource_stats", {})
         result.utility_totals = data.get("utility_totals", {})

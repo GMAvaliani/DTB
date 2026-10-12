@@ -184,3 +184,64 @@ def test_scenario_action_ref_must_exist(small_model):
         control_actions=[ControlAction(id="c", time=1.0, action_ref="ghost")],
     )
     assert not validate_scenario(small_model, scenario).ok_to_simulate
+
+
+def test_rbac_mismatch_is_warning(small_model):
+    """Субъект с ролью viewer не должен применять действия (фаза 2)."""
+    from dtb.domain.control import Policy, Subject
+
+    _with_action(small_model)
+    small_model.subjects["s"] = Subject(
+        id="s", name="s", authority_level=3, role_ref="viewer"
+    )
+    small_model.policies["p"] = Policy(
+        id="p", name="p", rule="true", action_ref="add_line", subject_ref="s"
+    )
+    report = validate_model(small_model)
+    assert any(i.code == "rbac_mismatch" for i in report.issues)
+    assert report.ok_to_simulate
+
+
+def test_unknown_rbac_role_rejected():
+    from dtb.domain.control import Subject
+
+    import pytest
+
+    with pytest.raises(ValueError, match="роль"):
+        Subject(id="s", name="s", role_ref="superuser")
+
+
+def test_action_requiring_authority_without_subject_is_warning(small_model):
+    _with_action(small_model)
+    small_model.control_actions["add_line"].min_authority_level = 2
+    report = validate_model(small_model)
+    assert any(i.code == "no_subject" for i in report.issues)
+
+
+def test_irreversible_action_with_term_is_warning(small_model):
+    _with_action(small_model)
+    small_model.control_actions["add_line"].reversible = False
+    small_model.control_actions["add_line"].term = 24.0
+    report = validate_model(small_model)
+    assert any(i.code == "irreversible_term" for i in report.issues)
+
+
+def test_activation_delay_beyond_term_is_warning(small_model):
+    _with_action(small_model)
+    small_model.control_actions["add_line"].activation_delay = 48.0
+    small_model.control_actions["add_line"].term = 24.0
+    report = validate_model(small_model)
+    assert any(i.code == "delay_exceeds_term" for i in report.issues)
+
+
+def test_scenario_subject_must_exist(small_model):
+    from dtb.domain.scenario import ControlAction
+
+    _with_action(small_model)
+    scenario = Scenario(
+        id="s", name="s", enterprise_id="acme",
+        control_actions=[
+            ControlAction(id="c", time=1.0, action_ref="add_line", subject_ref="ghost")
+        ],
+    )
+    assert not validate_scenario(small_model, scenario).ok_to_simulate
