@@ -29,6 +29,9 @@ class RelationType(str, Enum):
     MEMBER_OF = "MEMBER_OF"  # Employee → OrgUnit
     CONTRIBUTES_TO = "CONTRIBUTES_TO"  # Employee/Equipment → Resource
     MEASURED_BY = "MEASURED_BY"  # Goal → KPI
+    DECIDES = "DECIDES"  # DecisionPoint → Policy; Policy → ControlAction
+    OBSERVES = "OBSERVES"  # Observation → наблюдаемая компонента состояния
+    APPLIES = "APPLIES"  # Subject → Policy/ControlAction
 
 
 # Relation types that carry causal influence downstream (impact analysis).
@@ -41,6 +44,8 @@ CAUSAL_FORWARD: set[RelationType] = {
     RelationType.IMPLEMENTS,
     RelationType.MEASURED_BY,
     RelationType.CONTRIBUTES_TO,
+    RelationType.DECIDES,  # решение распространяется на действие и дальше по модели
+    RelationType.APPLIES,
 }
 # Relations traversed in reverse for downstream impact (consumer depends on utility;
 # SED depends on resource it uses).
@@ -49,6 +54,7 @@ CAUSAL_REVERSE: set[RelationType] = {
     RelationType.USES_RESOURCE,
     RelationType.USES_EQUIPMENT,
     RelationType.REQUIRES,
+    RelationType.OBSERVES,  # наблюдение зависит от наблюдаемой компоненты
 }
 
 

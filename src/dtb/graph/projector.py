@@ -39,6 +39,23 @@ def project_model(model: EnterpriseModel) -> KnowledgeGraph:
         "erp_object": lambda e: {"system": e.system, "object_type": e.object_type},
         "event_kind": lambda e: {"category": e.category.value, "stream": e.stream.kind.value},
         "kpi": lambda e: {"unit": e.unit},
+        "subject": lambda e: {"authority_level": e.authority_level},
+        "control_action": lambda e: {
+            "loop": e.loop.value if e.loop else "",
+            "one_time_cost": e.one_time_cost,
+            "reversible": e.reversible,
+        },
+        "policy": lambda e: {"loop": e.loop.value, "enabled": e.enabled},
+        "decision_point": lambda e: {
+            "kind": e.kind.value,
+            "requires_decision": e.requires_decision,
+        },
+        "observation": lambda e: {
+            "target": e.target_kind.value,
+            "delay": e.delay,
+            "relative_error": e.relative_error,
+            "mode": e.mode.value,
+        },
     }
     for etype, entity in model.iter_entities():
         props = label_props.get(etype, lambda e: {})(entity)
@@ -131,6 +148,55 @@ def project_model(model: EnterpriseModel) -> KnowledgeGraph:
         for target_id in kind.affected_entity_ids:
             if ":" in target_id and target_id in g.nodes:
                 rel(kid, target_id, RelationType.AFFECTS)
+
+    # -- контур управления: кто решает, что делает, что наблюдает ---------------
+    for action in model.control_actions.values():
+        aid = node_id("control_action", action.id)
+        effect = action.effect
+        if effect.resource_id:
+            rel(aid, node_id("resource", effect.resource_id), RelationType.AFFECTS,
+                delta=effect.delta)
+        if effect.utility_type_id:
+            rel(aid, node_id("utility_type", effect.utility_type_id), RelationType.AFFECTS)
+        if effect.sed_id:
+            rel(aid, node_id("sed", effect.sed_id), RelationType.AFFECTS)
+        if action.goal_ref:
+            rel(aid, node_id("goal", action.goal_ref), RelationType.IMPLEMENTS)
+        if action.subject_ref:
+            rel(node_id("subject", action.subject_ref), aid, RelationType.APPLIES)
+
+    for policy in model.policies.values():
+        pid = node_id("policy", policy.id)
+        for prule in policy.effective_rules():
+            if prule.action_ref:
+                rel(pid, node_id("control_action", prule.action_ref), RelationType.DECIDES,
+                    condition=prule.condition)
+        if policy.subject_ref:
+            rel(node_id("subject", policy.subject_ref), pid, RelationType.APPLIES)
+
+    for dp in model.decision_points.values():
+        did = node_id("decision_point", dp.id)
+        if dp.event_ref:
+            rel(node_id("event_kind", dp.event_ref), did, RelationType.TRIGGERS)
+        if dp.policy_ref:
+            rel(did, node_id("policy", dp.policy_ref), RelationType.DECIDES)
+        else:
+            for policy in model.policies.values():
+                rel(did, node_id("policy", policy.id), RelationType.DECIDES)
+
+    for obs in model.observations.values():
+        rel(
+            node_id("observation", obs.id),
+            node_id(obs.target_kind.value, obs.target_ref),
+            RelationType.OBSERVES,
+            metric=obs.effective_metric(),
+            delay=obs.delay,
+        )
+
+    for subject in model.subjects.values():
+        if subject.org_unit_ref:
+            rel(node_id("subject", subject.id), node_id("org_unit", subject.org_unit_ref),
+                RelationType.MEMBER_OF)
 
     for org in model.org_units.values():
         oid = node_id("org_unit", org.id)

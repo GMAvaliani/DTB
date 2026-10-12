@@ -169,3 +169,76 @@ def test_auth_roles_and_tenant_scope(tmp_path, monkeypatch):
                          headers={"X-API-Key": "ekey"}).status_code == 403
     assert client.delete("/api/enterprises/tenant_b",
                          headers={"X-API-Key": "akey"}).status_code == 200
+
+
+def test_control_loop_entities_and_run_endpoints(client):
+    """Фаза 1: сущности контура в API, журналы МР/политик/наблюдений в прогоне."""
+    client.post("/api/demo")
+    # сущности контура доступны через общий маршрут /entities/{etype}
+    for etype, expected in [
+        ("subject", "ceo"),
+        ("control_action", "overtime_shift"),
+        ("policy", "pol_overtime"),
+        ("decision_point", "dp_shift"),
+        ("observation", "obs_line_load"),
+    ]:
+        listed = client.get(f"/api/enterprises/demo_plant/entities/{etype}").json()
+        assert expected in {item["id"] for item in listed}, etype
+    counts = client.get("/api/enterprises/demo_plant").json()["counts"]
+    assert counts["policy"] == 3 and counts["decision_point"] == 4
+
+    # создание и удаление политики
+    r = client.post("/api/enterprises/demo_plant/entities/policy", json={
+        "id": "pol_test", "name": "Тестовая", "loop": "regulation",
+        "rule": "true", "action_ref": "overtime_shift",
+    })
+    assert r.status_code == 200 and r.json()["created"]
+    assert client.delete(
+        "/api/enterprises/demo_plant/entities/policy/pol_test"
+    ).json()["deleted"] == "pol_test"
+    # политика без действия → 422 на валидации pydantic
+    assert client.post("/api/enterprises/demo_plant/entities/policy",
+                       json={"id": "bad", "name": "Без действия"}).status_code == 422
+
+    sim_id = client.post("/api/simulations", json={
+        "scenario_id": "demo_baseline", "kind": "single", "seed": 20250819
+    }).json()["id"]
+    assert wait_done(client, sim_id) == "completed"
+
+    decisions = client.get(f"/api/simulations/{sim_id}/decisions").json()
+    assert decisions["decision_moments"] > 0
+    assert decisions["decision_moments"] < decisions["switching_moments"]
+    assert decisions["decision_log"][0]["triggers"]
+
+    trace = client.get(f"/api/simulations/{sim_id}/policy-trace").json()
+    assert trace["policy_firings"] > 0
+    assert set(trace["by_loop"]) == {"regulation", "organization", "development"}
+    only = client.get(
+        f"/api/simulations/{sim_id}/policy-trace?policy_id=pol_overtime"
+    ).json()
+    assert {e["policy"] for e in only["policy_trace"]} == {"pol_overtime"}
+
+    error = client.get(f"/api/simulations/{sim_id}/observation-error").json()
+    assert error["observations"]["obs_line_load"]["reads"] > 0
+    assert error["observations"]["obs_line_load"]["mean_abs_error"] > 0
+
+
+def test_twin_versus_pure_observation_difference(client):
+    """Цена неполноты наблюдений выводится сравнением двух прогонов."""
+    client.post("/api/demo")
+    ids = []
+    for scenario in ("demo_baseline", "demo_pure_observation"):
+        sim_id = client.post("/api/simulations", json={
+            "scenario_id": scenario, "kind": "single", "seed": 20250819
+        }).json()["id"]
+        assert wait_done(client, sim_id) == "completed"
+        ids.append(sim_id)
+    twin, pure = (
+        client.get(f"/api/simulations/{i}/observation-error").json() for i in ids
+    )
+    assert twin["observation_mode"] == "per_observation"
+    assert pure["observation_mode"] == "pure_simulation"
+    assert twin["observations"]["obs_prod_queue"]["mean_abs_error"] > 0
+    assert pure["observations"]["obs_prod_queue"]["mean_abs_error"] == 0
+    compare = client.get(f"/api/simulations/compare?ids={ids[0]},{ids[1]}").json()
+    assert compare

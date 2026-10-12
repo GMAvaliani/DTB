@@ -1,7 +1,8 @@
 """Excel import/export following the ActBasedDigTwinFrmwrk workbook layout:
 one sheet per view (goals, seds, utility_types, kpis, plans, actuals,
 org_units, employees, equipment, resources, event_kinds, erp_objects,
-erp_mappings, initial_state)."""
+erp_mappings, initial_state) plus the control-loop sheets (subjects,
+control_actions, policies, decision_points, observations)."""
 
 from __future__ import annotations
 
@@ -34,6 +35,13 @@ _ALIASES = {
     "планы": "plans",
     "прогноз": "plans",
     "состояние": "initial_state",
+    "субъекты": "subjects",
+    "действия": "control_actions",
+    "управляющие действия": "control_actions",
+    "политики": "policies",
+    "решения": "decision_points",
+    "точки решений": "decision_points",
+    "наблюдения": "observations",
 }
 
 

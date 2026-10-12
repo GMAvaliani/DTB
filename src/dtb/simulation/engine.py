@@ -32,6 +32,12 @@ from typing import Any, Callable
 from dtb.common.expr import ExpressionError, SafeExpression
 from dtb.common.seeding import derive_seed, substream
 from dtb.domain.base import utcnow_iso
+from dtb.domain.control import (
+    ControlActionDef,
+    ObservationMode,
+    Policy,
+    PolicyRule,
+)
 from dtb.domain.events import EffectKind, EventEffect, EventKind, StreamKind
 from dtb.domain.kpi import KPIDefinition
 from dtb.domain.model import EnterpriseModel, apply_scenario_overrides, _apply_parameter
@@ -44,6 +50,8 @@ from dtb.domain.seds import (
     TriggerKind,
 )
 from dtb.simulation.adapters import AdapterRegistry, ExternalModelError, default_registry
+from dtb.simulation.decisions import DecisionScheduler, DecisionTrigger, select_policies
+from dtb.simulation.observations import ObservationLayer
 from dtb.simulation.result import Provenance, SimulationResult
 from dtb.simulation.state import SEDInstance, SimulationState
 from dtb.simulation.streams import InjectedSampler, PoissonSampler, StreamSampler, build_sampler
@@ -137,6 +145,21 @@ class SimulationEngine:
             enumerate(scenario.control_actions), key=lambda p: (p[1].time, p[0])
         )
         self._control_index = 0
+        # --- контур управления: МР, политики, наблюдения ---
+        mode_override = (
+            ObservationMode(scenario.observation_mode) if scenario.observation_mode else None
+        )
+        self.observations = ObservationLayer(
+            self.model.observations, self.seed, mode_override=mode_override
+        )
+        self.decisions = DecisionScheduler(self.model.decision_points, self.horizon)
+        self._policy_cooldown: dict[str, float] = {}
+        self._pending_event_decisions: list[DecisionTrigger] = []
+        self._decision_log: list[dict[str, Any]] = []
+        self._policy_trace: list[dict[str, Any]] = []
+        self._n_decisions = 0
+        self._last_decision_time = 0.0
+        self._applied_by_policy_at: set[tuple[float, str]] = set()
         # trigger indexes
         self._on_event: dict[str, list[SEDDefinition]] = {}
         self._on_completed: dict[str, list[SEDDefinition]] = {}
@@ -204,6 +227,9 @@ class SimulationEngine:
                 injected.setdefault(ev.event_kind_id, []).append((ev.time, dict(ev.payload)))
         for kind_id, occs in sorted(injected.items()):
             self._injected[kind_id] = InjectedSampler(kind_id, occs)
+        # начальное состояние известно точно: снимаем нулевое наблюдение сразу
+        if self.observations.active:
+            self.observations.take_samples(0.0, self._observation_true_value)
 
     # ------------------------------------------------------------- expressions --
 
@@ -517,6 +543,220 @@ class SimulationEngine:
         self.state.waiting.append(inst)
         self._log_entry("sed_suspended", inst.sed_id, instance=inst.instance_id, reason=reason)
 
+    # -------------------------------------------- наблюдения и контур решений --
+
+    def _observation_true_value(self, obs) -> float:
+        """Истинное значение наблюдаемой компоненты состояния."""
+        kind = obs.target_kind.value
+        ref = obs.target_ref
+        metric = obs.effective_metric()
+        st = self.state
+        if kind == "utility_type":
+            if metric == "produced":
+                return st.produced.get(ref, 0.0)
+            if metric == "consumed":
+                return st.consumed.get(ref, 0.0)
+            return st.stock(ref)
+        if kind == "sed":
+            if metric == "executing":
+                return float(sum(1 for i in st.executing.values() if i.sed_id == ref))
+            if metric == "completed":
+                return float(st.completed_count.get(ref, 0))
+            if metric == "started":
+                return float(st.started_count.get(ref, 0))
+            return float(sum(1 for i in st.waiting if i.sed_id == ref))
+        if kind == "resource":
+            res = st.resources.get(ref)
+            if res is None:
+                return 0.0
+            if metric == "allocated":
+                return res.allocated
+            if metric == "available":
+                return res.available(st.time)
+            return res.utilization()
+        if kind == "kpi":
+            expr = self._kpi_exprs.get(ref)
+            if expr is None:
+                return 0.0
+            try:
+                return float(expr.evaluate(st.kpi_context()))
+            except (ExpressionError, TypeError, ValueError):
+                return 0.0
+        return 0.0  # link: наблюдение связи NOT IMPLEMENTED
+
+    def _decision_context(self) -> dict[str, Any]:
+        """Контекст, который видит политика: оценка Ŷ либо истина Y."""
+        base = self.state.kpi_context()
+        context = dict(base)
+        context["kpi"] = self._kpi_value
+        if not self.observations.active:
+            return context
+        t = self.state.time
+        layer = self.observations
+
+        def wrap(kind: str, metric: str, fn):
+            def wrapped(ref: str) -> float:
+                return layer.observed_value(kind, ref, metric, t, float(fn(ref)))
+
+            return wrapped
+
+        context["stock"] = wrap("utility_type", "stock", base["stock"])
+        context["produced"] = wrap("utility_type", "produced", base["produced"])
+        context["consumed"] = wrap("utility_type", "consumed", base["consumed"])
+        context["utilization"] = wrap("resource", "utilization", base["utilization"])
+        context["waiting_count"] = wrap("sed", "queue", base["waiting_count"])
+        context["executing_count"] = wrap("sed", "executing", base["executing_count"])
+        context["completed"] = wrap("sed", "completed", base["completed"])
+        context["kpi"] = wrap("kpi", "value", self._kpi_value)
+        return context
+
+    def _kpi_value(self, kpi_id: str) -> float:
+        expr = self._kpi_exprs.get(kpi_id)
+        if expr is None:
+            return 0.0
+        try:
+            return float(expr.evaluate(self.state.kpi_context()))
+        except (ExpressionError, TypeError, ValueError):
+            return 0.0
+
+    def _eval_in_context(self, source: str, context: dict[str, Any]) -> Any:
+        return self._expr(source).evaluate(context)
+
+    def _watchdog_evaluate(self, condition: str) -> bool:
+        try:
+            return bool(self._eval_in_context(condition, self._decision_context()))
+        except ExpressionError:
+            return False
+
+    def _collect_decision_triggers(self) -> list[DecisionTrigger]:
+        """Какие точки принятия решений сработали в текущий МП."""
+        triggers: list[DecisionTrigger] = []
+        triggers.extend(self.decisions.timers_due(self.state.time))
+        triggers.extend(self._pending_event_decisions)
+        self._pending_event_decisions = []
+        triggers.extend(self.decisions.watchdog_triggers(self._watchdog_evaluate))
+        return triggers
+
+    def _run_decisions(self, triggers: list[DecisionTrigger]) -> None:
+        """Обработать момент принятия решений: вызвать политики, применить действия."""
+        if not triggers:
+            return
+        t = self.state.time
+        interval = max(0.0, t - self._last_decision_time)
+        self._n_decisions += 1
+        applied_total = 0
+        for trig in triggers:
+            dp = self.model.decision_points.get(trig.decision_point_id)
+            if dp is None or not dp.requires_decision:
+                continue
+            policies = select_policies(
+                self.model.policies, dp, t, self._policy_cooldown
+            )
+            for policy in policies:
+                applied_total += self._evaluate_policy(policy, dp, trig)
+        self._decision_log.append(
+            {
+                "t": round(t, 6),
+                "interval": round(interval, 6),
+                "triggers": [
+                    {"decision_point": x.decision_point_id, "kind": x.kind, "source": x.source}
+                    for x in triggers
+                ],
+                "actions_applied": applied_total,
+            }
+        )
+        self._last_decision_time = t
+
+    def _evaluate_policy(self, policy: Policy, dp, trig: DecisionTrigger) -> int:
+        """Проверить правила политики и применить действие при истинном условии."""
+        context = self._decision_context()
+        applied = 0
+        for rule in policy.effective_rules():
+            try:
+                fired = bool(self._eval_in_context(rule.condition, context))
+            except ExpressionError as exc:
+                self._policy_trace.append(
+                    {
+                        "t": round(self.state.time, 6),
+                        "policy": policy.id,
+                        "loop": policy.loop.value,
+                        "decision_point": dp.id,
+                        "fired": False,
+                        "error": str(exc),
+                    }
+                )
+                continue
+            entry = {
+                "t": round(self.state.time, 6),
+                "policy": policy.id,
+                "loop": policy.loop.value,
+                "decision_point": dp.id,
+                "trigger": trig.kind,
+                "condition": rule.condition,
+                "fired": fired,
+                "action": rule.action_ref,
+            }
+            if fired:
+                magnitude = None
+                if rule.magnitude_expression:
+                    try:
+                        magnitude = float(
+                            self._eval_in_context(rule.magnitude_expression, context)
+                        )
+                    except (ExpressionError, TypeError, ValueError):
+                        magnitude = None
+                outcome = self._apply_control_action(
+                    rule.action_ref, source=f"policy:{policy.id}", magnitude=magnitude,
+                    policy=policy,
+                )
+                entry["outcome"] = outcome
+                if outcome == "applied":
+                    applied += 1
+                    if policy.cooldown_hours:
+                        self._policy_cooldown[policy.id] = (
+                            self.state.time + policy.cooldown_hours
+                        )
+            self._policy_trace.append(entry)
+            if fired:
+                break  # первая сработавшая ветвь правила
+        return applied
+
+    def _effect_with_magnitude(self, effect: EventEffect, magnitude: float | None) -> EventEffect:
+        """Подставить величину действия в эффект, не меняя исходный объект."""
+        if magnitude is None:
+            return effect
+        updated = effect.model_copy(deep=True)
+        if updated.kind == EffectKind.RESOURCE_CAPACITY_DELTA:
+            updated.delta = magnitude
+        else:
+            updated.quantity_expression = repr(float(magnitude))
+        return updated
+
+    def _apply_control_action(
+        self,
+        action_ref: str | None,
+        source: str,
+        magnitude: float | None = None,
+        policy: Policy | None = None,
+    ) -> str:
+        """Применить каталожное управляющее действие. Возвращает исход."""
+        if not action_ref:
+            return "no_action"
+        action = self.model.control_actions.get(action_ref)
+        if action is None:
+            self._log_entry("warning", "unknown_control_action", action=action_ref, source=source)
+            return "unknown_action"
+        effect = self._effect_with_magnitude(
+            action.effect, magnitude if magnitude is not None else action.magnitude
+        )
+        self._apply_effect(effect, {}, source)
+        self._applied_by_policy_at.add((round(self.state.time, 6), action_ref))
+        self._log_entry(
+            "control_action_applied", action_ref, source=source,
+            policy=policy.id if policy else None,
+        )
+        return "applied"
+
     # ------------------------------------------------------------------ effects --
 
     def _apply_effect(self, effect: EventEffect, payload: dict[str, Any], source: str) -> None:
@@ -587,7 +827,9 @@ class SimulationEngine:
     def _process_event(self, kind: EventKind, payload: dict[str, Any], source: str) -> None:
         merged = {**kind.payload_defaults, **payload}
         self.state.event_counts[kind.id] = self.state.event_counts.get(kind.id, 0) + 1
+        self.state.last_event_time[kind.id] = self.state.time
         self._n_np_events += 1
+        self._pending_event_decisions.extend(self.decisions.event_triggers(kind.id))
         self._log_entry("np_event", kind.id, category=kind.category.value, source=source, payload=merged)
         for effect in kind.effects:
             self._apply_effect(effect, merged, f"event:{kind.id}")
@@ -660,6 +902,12 @@ class SimulationEngine:
         if self._control_index < len(self._controls):
             idx, action = self._controls[self._control_index]
             out.append((action.time, 4, f"{idx:06d}", ("control", self._control_index)))
+        obs_t = self.observations.next_sample_time(now)
+        if obs_t is not None and obs_t > now - _EPS:
+            out.append((obs_t, 5, "observation", ("obs_sample", None)))
+        timer_t = self.decisions.next_timer_time(now)
+        if timer_t is not None:
+            out.append((timer_t, 6, "decision_timer", ("decision_timer", None)))
         return out
 
     def _loop(self) -> str:
@@ -689,10 +937,24 @@ class SimulationEngine:
                 key=lambda c: (c[1], c[2]),
             )
             self._n_moments += 1
+            # сценарные действия применяются после политик: приоритет у контура
+            deferred: list[tuple[str, Any]] = []
             for _, order_class, _, token in batch:
+                if token[0] == "control" and self.decisions.active:
+                    deferred.append(token)
+                    continue
                 self._dispatch(token)
             self._check_continuation()
             self._try_start_waiting()
+            # момент принятия решений: политики вызываются только здесь
+            triggers = self._collect_decision_triggers()
+            if triggers:
+                self._run_decisions(triggers)
+            for token in deferred:
+                self._dispatch(token)
+            if triggers or deferred:
+                self._check_continuation()
+                self._try_start_waiting()  # ТЗ: повторить попытку запуска
             self._record_series()
             moments_since_progress += 1
             if self.progress_cb and moments_since_progress >= self.config.progress_every:
@@ -735,8 +997,22 @@ class SimulationEngine:
             if ref == self._control_index:
                 self._control_index += 1
                 _, action = self._controls[ref]
-                self._log_entry("control_action", action.label or action.effect.kind.value)
-                self._apply_effect(action.effect, {}, "control")
+                stamp = (round(self.state.time, 6), action.action_ref or "")
+                if action.action_ref and stamp in self._applied_by_policy_at:
+                    # приоритет у политики: то же действие в тот же момент не дублируем
+                    self._log_entry(
+                        "control_action_skipped", action.action_ref, reason="policy_priority"
+                    )
+                elif action.action_ref:
+                    self._log_entry("control_action", action.label or action.action_ref)
+                    self._apply_control_action(action.action_ref, source="scenario")
+                elif action.effect is not None:
+                    self._log_entry("control_action", action.label or action.effect.kind.value)
+                    self._apply_effect(action.effect, {}, "control")
+        elif kind == "obs_sample":
+            self.observations.take_samples(self.state.time, self._observation_true_value)
+        elif kind == "decision_timer":
+            pass  # сам МР обрабатывается после батча, в _loop
 
     def _advance_to(self, t: float) -> None:
         dt = t - self.state.time
@@ -769,6 +1045,9 @@ class SimulationEngine:
         result.pool_series = self._pool_series
         result.event_log = self._log
         result.event_log_truncated = self._log_dropped
+        result.decision_log = self._decision_log
+        result.policy_trace = self._policy_trace
+        result.observation_error = self.observations.error_report()
         result.final_stocks = {k: round(v, 6) for k, v in self.state.stocks.items()}
         context = self.state.kpi_context()
         for kid, expr in self._kpi_exprs.items():
@@ -831,6 +1110,13 @@ class SimulationEngine:
             "sim_time_hours": round(self.state.time, 6),
             "wall_time_seconds": round(wall_time.monotonic() - started_wall, 4),
             "seed": self.seed,
+            "decision_moments": self._n_decisions,
+            "policy_firings": sum(1 for e in self._policy_trace if e.get("fired")),
+            "observation_mode": (
+                self.observations.mode_override.value
+                if self.observations.mode_override
+                else "per_observation"
+            ),
         }
 
     def _goal_achievement(self, result: SimulationResult) -> dict[str, dict[str, Any]]:

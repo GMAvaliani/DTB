@@ -360,6 +360,55 @@ def simulation_results(request: Request, sim_id: str) -> dict[str, Any]:
     return _result_payload(record)
 
 
+@router.get("/simulations/{sim_id}/decisions", dependencies=[VIEW])
+def simulation_decisions(request: Request, sim_id: str, limit: int = 2000) -> dict[str, Any]:
+    """Журнал моментов принятия решений (МР) с длиной интервала между ними."""
+    record = _record_or_404(ctx(request), sim_id)
+    result = _sample_result(record)
+    log = result.decision_log
+    return {
+        "decision_log": log[: min(limit, len(log))],
+        "decision_moments": result.metrics.get("decision_moments", 0),
+        "switching_moments": result.metrics.get("switching_moments", 0),
+        "truncated": len(log) > limit,
+    }
+
+
+@router.get("/simulations/{sim_id}/policy-trace", dependencies=[VIEW])
+def simulation_policy_trace(
+    request: Request, sim_id: str, limit: int = 2000, policy_id: str | None = None
+) -> dict[str, Any]:
+    """Трассировка вызовов политик: условие, факт сработки, применённое действие."""
+    record = _record_or_404(ctx(request), sim_id)
+    result = _sample_result(record)
+    trace = result.policy_trace
+    if policy_id:
+        trace = [entry for entry in trace if entry.get("policy") == policy_id]
+    by_loop: dict[str, dict[str, int]] = {}
+    for entry in trace:
+        bucket = by_loop.setdefault(entry.get("loop", "regulation"), {"calls": 0, "fired": 0})
+        bucket["calls"] += 1
+        if entry.get("fired"):
+            bucket["fired"] += 1
+    return {
+        "policy_trace": trace[: min(limit, len(trace))],
+        "policy_firings": result.metrics.get("policy_firings", 0),
+        "by_loop": by_loop,
+        "truncated": len(trace) > limit,
+    }
+
+
+@router.get("/simulations/{sim_id}/observation-error", dependencies=[VIEW])
+def simulation_observation_error(request: Request, sim_id: str) -> dict[str, Any]:
+    """Погрешность наблюдения по компонентам состояния: |Y − Ŷ| за прогон."""
+    record = _record_or_404(ctx(request), sim_id)
+    result = _sample_result(record)
+    return {
+        "observation_mode": result.metrics.get("observation_mode", "twin"),
+        "observations": result.observation_error,
+    }
+
+
 @router.get("/simulations/{sim_id}/bottlenecks", dependencies=[VIEW])
 def simulation_bottlenecks(request: Request, sim_id: str) -> list[dict[str, Any]]:
     context = ctx(request)

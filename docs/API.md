@@ -24,7 +24,9 @@ PUT    /enterprises/{eid}/series/{plans|actuals}/{kpi_id}
 ```
 
 `{etype}`: goal | utility_type | sed | resource | org_unit | employee |
-equipment | erp_object | event_kind | kpi.
+equipment | erp_object | event_kind | kpi | subject | control_action | policy |
+decision_point | observation (+ заготовки link | gap_type — движком не
+используются).
 
 ## Версии, валидация, качество данных
 
@@ -86,6 +88,9 @@ GET  /simulations/{id}/events      журнал НП-событий/перехо
 GET  /simulations/{id}/timeline    KPI/сток/пул-траектории + статистика
 GET  /simulations/{id}/results     полный результат (single или Монте-Карло)
 GET  /simulations/{id}/bottlenecks
+GET  /simulations/{id}/decisions            журнал МР: триггеры + интервал
+GET  /simulations/{id}/policy-trace[?policy_id=]  вызовы политик по контурам
+GET  /simulations/{id}/observation-error    |Y − Ŷ| по компонентам состояния
 GET  /simulations/{id}/stream      SSE-прогресс (text/event-stream)
 GET  /simulations/compare?ids=a,b  сравнение (первый — baseline)
 ```

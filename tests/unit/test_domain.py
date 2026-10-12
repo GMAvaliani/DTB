@@ -94,3 +94,64 @@ def test_entity_collections_api(small_model):
     with pytest.raises(KeyError):
         small_model.collection("nope")
     assert {etype for etype, _ in small_model.iter_entities()} >= {"sed", "goal", "kpi"}
+
+
+# --------------------------------------- миграция схемы модели (ТЗ 0.4 и 0.6) --
+
+
+def test_v1_snapshot_loads_with_control_loop_defaults(small_model):
+    """Модель, сохранённая до появления контура управления, грузится без ошибок."""
+    from dtb.domain.model import SCHEMA_VERSION, EnterpriseModel
+
+    snapshot = small_model.to_snapshot()
+    legacy = {
+        key: value
+        for key, value in snapshot.items()
+        if key
+        not in (
+            "schema_version",
+            "subjects",
+            "control_actions",
+            "policies",
+            "decision_points",
+            "observations",
+            "links",
+            "gap_types",
+            "gaps",
+        )
+    }
+    restored = EnterpriseModel.from_snapshot(legacy)
+    assert restored.schema_version == SCHEMA_VERSION
+    assert restored.policies == {} and restored.decision_points == {}
+    assert restored.observations == {} and restored.subjects == {}
+    assert set(restored.seds) == set(small_model.seds)
+    assert restored.content_hash() == small_model.content_hash()
+
+
+def test_v1_snapshot_still_simulates(small_model, base_scenario):
+    """Регресс ТЗ 0.6: старая модель считается ровно как раньше."""
+    from dtb.domain.model import EnterpriseModel
+    from dtb.simulation import simulate
+
+    snapshot = small_model.to_snapshot()
+    snapshot.pop("schema_version")
+    for key in ("subjects", "control_actions", "policies", "decision_points",
+                "observations", "links", "gap_types", "gaps"):
+        snapshot.pop(key, None)
+    restored = EnterpriseModel.from_snapshot(snapshot)
+    before = simulate(small_model, base_scenario, seed=42)
+    after = simulate(restored, base_scenario, seed=42)
+    assert before.content_digest() == after.content_digest()
+    assert after.metrics["decision_moments"] == 0
+
+
+def test_future_schema_version_raises_clear_error(small_model):
+    """Снимок новее поддерживаемой версии даёт понятную ошибку, а не падение."""
+    import pytest
+
+    from dtb.domain.model import SCHEMA_VERSION, EnterpriseModel
+
+    snapshot = small_model.to_snapshot()
+    snapshot["schema_version"] = SCHEMA_VERSION + 1
+    with pytest.raises(ValueError, match="версию схемы"):
+        EnterpriseModel.from_snapshot(snapshot)

@@ -147,6 +147,7 @@ class SimulationState:
         self.cancelled_count: dict[str, int] = {}
         self.failed_count: dict[str, int] = {}
         self.event_counts: dict[str, int] = {}
+        self.last_event_time: dict[str, float] = {}  # для сторожевых условий
         # bottleneck accounting: waiting hours per (sed_id, cause)
         self.blocked_hours: dict[tuple[str, str], float] = {}
         self.queue_peak: dict[str, int] = {}
@@ -207,6 +208,11 @@ class SimulationState:
             "completed": lambda s: float(self.completed_count.get(s, 0)),
             "started": lambda s: float(self.started_count.get(s, 0)),
             "events": lambda k: float(self.event_counts.get(k, 0)),
+            "time_since_event": lambda k: (
+                self.time - self.last_event_time[k]
+                if k in self.last_event_time
+                else self.time
+            ),
             "utilization": lambda r: (
                 self.resources[r].utilization() if r in self.resources else 0.0
             ),

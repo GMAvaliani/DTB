@@ -109,3 +109,64 @@ def test_mock_erp_sync_normalizes(small_model):
     assert small_model.initial_state.source == "erp:mock_1c"
     # unknown utility types are warned about, not silently created
     assert any("raw_material" in w["message"] for w in report.warnings)
+
+
+def test_excel_roundtrip_control_loop():
+    """Контур управления переносится через Excel без потерь (фаза 1, ТЗ 0.4)."""
+    from dtb.demo import build_demo_model
+
+    demo = build_demo_model()
+    target = EnterpriseModel(enterprise=Enterprise(id="copy", name="Copy"))
+    report = import_workbook(target, export_workbook(demo))
+    assert report.ok, report.errors
+    assert set(target.subjects) == set(demo.subjects)
+    assert set(target.control_actions) == set(demo.control_actions)
+    assert set(target.policies) == set(demo.policies)
+    assert set(target.decision_points) == set(demo.decision_points)
+    assert set(target.observations) == set(demo.observations)
+    action = target.control_actions["second_shift_crew"]
+    assert action.loop.value == "organization"
+    assert action.effect.resource_id == "production_line"
+    assert action.activation_delay == 48
+    assert action.one_time_cost == 120_000
+    assert action.term == 336
+    assert target.control_actions["third_line"].reversible is False
+    assert target.control_actions["third_line"].success_probability == 0.85
+    assert target.policies["pol_overtime"].cooldown_hours == 48
+    assert target.policies["pol_overtime"].action_ref == "overtime_shift"
+    dp = target.decision_points["dp_shift"]
+    assert dp.kind.value == "timer" and dp.timer_period == 24 and dp.timer_start == 8
+    assert target.decision_points["dp_failure"].event_ref == "equipment_failure"
+    obs = target.observations["obs_line_load"]
+    assert obs.estimator.value == "smooth" and obs.delay == 8 and obs.relative_error == 0.1
+    assert target.subjects["ceo"].authority_level == 3
+    assert validate_model(target).ok_to_simulate
+
+
+def test_csv_policy_rules_compact_syntax(small_model):
+    """Правила политики читаются из компактной записи ``условие -> действие @ величина``."""
+    from dtb.integration import import_csv
+
+    small_model.control_actions.clear()
+    import_csv(
+        small_model,
+        "control_actions",
+        'id,name,effect\n'
+        'add_line,Линия,"{""kind"": ""resource_capacity_delta"", '
+        '""resource_id"": ""line"", ""delta"": 1}"\n',
+    )
+    report = import_csv(
+        small_model,
+        "policies",
+        "id,name,loop,rules,priority\n"
+        'p1,Расширение,organization,"stock(\'material\') < 50 -> add_line @ 2; '
+        'true -> add_line",20\n',
+    )
+    assert report.ok, report.errors
+    policy = small_model.policies["p1"]
+    assert policy.loop.value == "organization"
+    assert len(policy.rules) == 2
+    assert policy.rules[0].condition == "stock('material') < 50"
+    assert policy.rules[0].action_ref == "add_line"
+    assert policy.rules[0].magnitude_expression == "2"
+    assert policy.rules[1].magnitude_expression is None

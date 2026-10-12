@@ -44,6 +44,17 @@ from dtb.domain import (
     UtilityKind,
     UtilityType,
 )
+from dtb.domain.control import (
+    ControlActionDef,
+    ControlLoop,
+    DecisionPoint,
+    DecisionPointKind,
+    Estimator,
+    Observation,
+    ObservationTarget,
+    Policy,
+    Subject,
+)
 from dtb.integration.base import sync_connector
 from dtb.integration.mock_erp import MockERPConnector
 
@@ -352,9 +363,147 @@ def build_demo_model() -> EnterpriseModel:
         SeriesPoint(t=0, value=0),
     ]
 
+    # -- контур управления: субъекты, действия, политики, МР, наблюдения ---------
+    _add_control_loop(m)
+
     # -- ERP micro-level (views 4–7) through the real connector pipeline ----------
     sync_connector(m, MockERPConnector())
     return m
+
+
+def _add_control_loop(m: EnterpriseModel) -> None:
+    """Три контура управления демо-завода: регулирование, организация, развитие.
+
+    Политики читают наблюдаемое состояние (с периодом, задержкой и
+    погрешностью) и применяют действия из каталога. Решения принимаются только
+    в моменты принятия решений: смена (24 ч), неделя (168 ч), квартал (240 ч) и
+    отказ оборудования.
+    """
+    m.subjects["shift_supervisor"] = Subject(
+        id="shift_supervisor", name="Начальник смены", authority_level=1,
+        org_unit_ref="ou_production", role_ref="editor",
+        description="Принимает решения контура регулирования",
+    )
+    m.subjects["plant_manager"] = Subject(
+        id="plant_manager", name="Директор по производству", authority_level=2,
+        org_unit_ref="ou_production", role_ref="editor",
+        description="Принимает решения контура организации",
+    )
+    m.subjects["ceo"] = Subject(
+        id="ceo", name="Генеральный директор", authority_level=3,
+        org_unit_ref="company", role_ref="admin",
+        description="Принимает решения контура развития",
+    )
+
+    m.control_actions["overtime_shift"] = ControlActionDef(
+        id="overtime_shift", name="Сверхурочная смена", loop=ControlLoop.REGULATION,
+        description="Временное расширение сборочной мощности на сутки",
+        goal_ref="g_production",
+        effect=EventEffect(
+            kind=EffectKind.RESOURCE_CAPACITY_DELTA,
+            resource_id="production_line", delta=1, duration=24,
+        ),
+        one_time_cost=45_000, term=24, min_authority_level=1,
+        subject_ref="shift_supervisor",
+    )
+    m.control_actions["second_shift_crew"] = ControlActionDef(
+        id="second_shift_crew", name="Бригада второй смены", loop=ControlLoop.ORGANIZATION,
+        description="Набор бригады на две недели: перераспределение мощности, "
+        "вступает в силу через двое суток после решения",
+        goal_ref="g_production",
+        effect=EventEffect(
+            kind=EffectKind.RESOURCE_CAPACITY_DELTA,
+            resource_id="production_line", delta=1, duration=336,
+        ),
+        activation_delay=48, one_time_cost=120_000, recurring_cost=900,
+        term=336, min_authority_level=2, subject_ref="plant_manager",
+    )
+    m.control_actions["third_line"] = ControlActionDef(
+        id="third_line", name="Третья сборочная линия", loop=ControlLoop.DEVELOPMENT,
+        description="Инвестиция в постоянное расширение производственной мощности",
+        goal_ref="g_root",
+        effect=EventEffect(
+            kind=EffectKind.RESOURCE_CAPACITY_DELTA, resource_id="production_line", delta=1,
+        ),
+        activation_delay=168, one_time_cost=4_500_000, recurring_cost=3_500,
+        reversible=False, success_probability=0.85,
+        min_authority_level=3, subject_ref="ceo",
+    )
+
+    m.policies["pol_overtime"] = Policy(
+        id="pol_overtime", name="Регулирование: очередь на сборке",
+        description="Если на сборку ждёт три и более задания — сверхурочная смена",
+        loop=ControlLoop.REGULATION, subject_ref="shift_supervisor",
+        state_selector=["waiting_count('production')"],
+        rule="waiting_count('production') >= 3", action_ref="overtime_shift",
+        cooldown_hours=48, priority=10,
+    )
+    m.policies["pol_second_shift"] = Policy(
+        id="pol_second_shift", name="Организация: вторая смена",
+        description="Если наблюдаемая загрузка линий выше 70% — набираем бригаду",
+        loop=ControlLoop.ORGANIZATION, subject_ref="plant_manager",
+        state_selector=["utilization('production_line')"],
+        rule="utilization('production_line') >= 0.7", action_ref="second_shift_crew",
+        cooldown_hours=336, priority=20,
+    )
+    m.policies["pol_invest"] = Policy(
+        id="pol_invest", name="Развитие: третья линия",
+        description="Если линии устойчиво загружены и накоплены средства — инвестируем",
+        loop=ControlLoop.DEVELOPMENT, subject_ref="ceo",
+        state_selector=["utilization('production_line')", "stock('money')"],
+        rule="utilization('production_line') >= 0.6 and stock('money') >= 800000",
+        action_ref="third_line", cooldown_hours=480, priority=30,
+    )
+
+    m.decision_points["dp_shift"] = DecisionPoint(
+        id="dp_shift", name="Пересмотр по смене", kind=DecisionPointKind.TIMER,
+        description="Регламентный момент решения контура регулирования",
+        timer_period=24, timer_start=8, policy_ref="pol_overtime",
+    )
+    m.decision_points["dp_week"] = DecisionPoint(
+        id="dp_week", name="Недельный штаб", kind=DecisionPointKind.TIMER,
+        description="Регламентный момент решения контура организации",
+        timer_period=168, timer_start=168, policy_ref="pol_second_shift",
+    )
+    m.decision_points["dp_quarter"] = DecisionPoint(
+        id="dp_quarter", name="Инвестиционный комитет", kind=DecisionPointKind.TIMER,
+        description="Регламентный момент решения контура развития",
+        timer_period=240, timer_start=240, policy_ref="pol_invest",
+    )
+    m.decision_points["dp_failure"] = DecisionPoint(
+        id="dp_failure", name="Решение по отказу оборудования",
+        kind=DecisionPointKind.EVENT, event_ref="equipment_failure",
+        description="Внеплановый момент решения: отказ требует реакции смены",
+        policy_ref="pol_overtime",
+    )
+
+    m.observations["obs_line_load"] = Observation(
+        id="obs_line_load", name="Загрузка линий (наблюдаемая)",
+        description="Снимается раз в смену со сглаживанием и погрешностью 10%",
+        target_kind=ObservationTarget.RESOURCE, target_ref="production_line",
+        metric="utilization", period=8, delay=8, relative_error=0.1,
+        estimator=Estimator.SMOOTH, alpha=0.5,
+    )
+    m.observations["obs_qc_load"] = Observation(
+        id="obs_qc_load", name="Загрузка ОТК (наблюдаемая)",
+        target_kind=ObservationTarget.RESOURCE, target_ref="qc_station",
+        metric="utilization", period=24, delay=24, relative_error=0.05,
+        estimator=Estimator.LAST,
+    )
+    m.observations["obs_prod_queue"] = Observation(
+        id="obs_prod_queue", name="Очередь на сборке (наблюдаемая)",
+        description="Диспетчер видит очередь с запаздыванием в четыре часа",
+        target_kind=ObservationTarget.SED, target_ref="production",
+        metric="waiting_count", period=4, delay=4, relative_error=0.0,
+        estimator=Estimator.LAST,
+    )
+    m.observations["obs_money"] = Observation(
+        id="obs_money", name="Денежные средства (наблюдаемые)",
+        description="Финансовый учёт закрывается раз в неделю",
+        target_kind=ObservationTarget.UTILITY_TYPE, target_ref="money",
+        metric="stock", period=168, delay=24, relative_error=0.02,
+        estimator=Estimator.LAST,
+    )
 
 
 def build_demo_scenarios() -> list[Scenario]:
@@ -412,7 +561,16 @@ def build_demo_scenarios() -> list[Scenario]:
         ],
         objective=ObjectiveSpec(kpi_id="revenue", target=2_000_000),
     )
-    return [base, demand_growth, extra_line, failures, managed]
+    pure_observation = Scenario(
+        id="demo_pure_observation", name="Полная наблюдаемость (эталон)",
+        description="Те же политики, но решения принимаются по истинному состоянию: "
+        "разность с базовым сценарием — цена неполноты наблюдений",
+        enterprise_id=DEMO_ID, base_scenario_id="demo_baseline",
+        seed=DEMO_SEED, monte_carlo_runs=20,
+        observation_mode="pure_simulation",
+        objective=ObjectiveSpec(kpi_id="revenue", target=2_000_000),
+    )
+    return [base, demand_growth, extra_line, failures, managed, pure_observation]
 
 
 def create_demo() -> tuple[EnterpriseModel, list[Scenario]]:

@@ -81,3 +81,106 @@ def test_data_quality_flags_unsourced_consumption(small_model):
         for i in dq["issues"]
     )
     assert dq["score"] < 100
+
+
+# ------------------------------------------------- контур управления (фаза 1) --
+
+
+def _with_action(model):
+    from dtb.domain import EffectKind, EventEffect
+    from dtb.domain.control import ControlActionDef
+
+    model.control_actions["add_line"] = ControlActionDef(
+        id="add_line", name="Линия",
+        effect=EventEffect(
+            kind=EffectKind.RESOURCE_CAPACITY_DELTA, resource_id="line", delta=1
+        ),
+    )
+    return model
+
+
+def test_policy_with_unknown_action_is_critical(small_model):
+    from dtb.domain.control import Policy
+
+    small_model.policies["p"] = Policy(
+        id="p", name="p", rule="true", action_ref="ghost_action"
+    )
+    report = validate_model(small_model)
+    assert any(
+        i.code == "broken_ref" and i.entity_type == "policy" for i in report.critical
+    )
+
+
+def test_control_action_with_unknown_resource_is_critical(small_model):
+    from dtb.domain import EffectKind, EventEffect
+    from dtb.domain.control import ControlActionDef
+
+    small_model.control_actions["bad"] = ControlActionDef(
+        id="bad", name="bad",
+        effect=EventEffect(
+            kind=EffectKind.RESOURCE_CAPACITY_DELTA, resource_id="ghost", delta=1
+        ),
+    )
+    assert not validate_model(small_model).ok_to_simulate
+
+
+def test_decision_point_with_unknown_event_is_critical(small_model):
+    from dtb.domain.control import DecisionPoint, DecisionPointKind
+
+    small_model.decision_points["dp"] = DecisionPoint(
+        id="dp", name="dp", kind=DecisionPointKind.EVENT, event_ref="ghost_event"
+    )
+    assert not validate_model(small_model).ok_to_simulate
+
+
+def test_observation_with_unknown_target_is_critical(small_model):
+    from dtb.domain.control import Observation, ObservationTarget
+
+    small_model.observations["o"] = Observation(
+        id="o", name="o", target_kind=ObservationTarget.RESOURCE, target_ref="ghost"
+    )
+    assert not validate_model(small_model).ok_to_simulate
+
+
+def test_policy_without_decision_point_is_warning(small_model):
+    from dtb.domain.control import Policy
+
+    _with_action(small_model)
+    small_model.policies["p"] = Policy(
+        id="p", name="p", rule="true", action_ref="add_line"
+    )
+    report = validate_model(small_model)
+    assert report.ok_to_simulate
+    assert any(i.code == "policy_never_invoked" for i in report.issues)
+
+
+def test_insufficient_authority_is_warning(small_model):
+    from dtb.domain.control import Subject
+
+    _with_action(small_model)
+    small_model.subjects["s"] = Subject(id="s", name="s", authority_level=1)
+    small_model.control_actions["add_line"].min_authority_level = 3
+    small_model.control_actions["add_line"].subject_ref = "s"
+    report = validate_model(small_model)
+    assert any(i.code == "insufficient_authority" for i in report.issues)
+    assert report.ok_to_simulate
+
+
+def test_policy_invalid_condition_is_critical(small_model):
+    from dtb.domain.control import Policy
+
+    _with_action(small_model)
+    small_model.policies["p"] = Policy(
+        id="p", name="p", rule="waiting_count('production') >=", action_ref="add_line"
+    )
+    assert not validate_model(small_model).ok_to_simulate
+
+
+def test_scenario_action_ref_must_exist(small_model):
+    from dtb.domain.scenario import ControlAction
+
+    scenario = Scenario(
+        id="s", name="s", enterprise_id="acme",
+        control_actions=[ControlAction(id="c", time=1.0, action_ref="ghost")],
+    )
+    assert not validate_scenario(small_model, scenario).ok_to_simulate

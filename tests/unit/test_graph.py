@@ -65,3 +65,24 @@ def test_unknown_relation_endpoints_rejected():
         raise AssertionError("expected KeyError")
     except KeyError:
         pass
+
+
+def test_control_loop_is_projected_into_graph():
+    """Контур управления попадает в граф знаний: решение → действие → ресурс."""
+    from dtb.demo import build_demo_model
+
+    g = project_model(build_demo_model())
+    stats = g.stats()
+    assert stats["nodes"]["policy"] == 3
+    assert stats["nodes"]["decision_point"] == 4
+    assert stats["relations"]["DECIDES"] >= 6
+    assert stats["relations"]["OBSERVES"] == 4
+    assert stats["relations"]["APPLIES"] >= 6
+    # анализ влияния доходит от точки решения до ресурса и цели
+    impact = g.impact("decision_point:dp_shift")
+    node_ids = {n["id"] for n in impact["nodes"]}
+    assert {"policy:pol_overtime", "control_action:overtime_shift",
+            "resource:production_line"} <= node_ids
+    # наблюдение зависит от наблюдаемой компоненты состояния
+    deps = g.dependencies("observation:obs_line_load")
+    assert "resource:production_line" in {n["id"] for n in deps["nodes"]}

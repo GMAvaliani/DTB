@@ -25,12 +25,25 @@ class InjectedEvent(EntityBase):
 
 
 class ControlAction(EntityBase):
-    """Management control u(t): a timed effect applied to the running model."""
+    """Управляющее воздействие u(t), привязанное ко времени.
+
+    Либо несёт встроенный ``effect`` (как раньше), либо ссылается на
+    каталожное действие модели через ``action_ref``. Политики (контур
+    управления) применяют каталожные действия по состоянию; при совпадении
+    действия и момента приоритет у политики.
+    """
 
     id: str = "-"
     time: float = Field(ge=0)
-    effect: EventEffect
+    effect: EventEffect | None = None
+    action_ref: str | None = None
     label: str = ""
+
+    @model_validator(mode="after")
+    def _check_target(self) -> "ControlAction":
+        if self.effect is None and not self.action_ref:
+            raise ValueError("управляющее воздействие требует effect либо action_ref")
+        return self
 
 
 class SEDOverride(EntityBase):
@@ -66,6 +79,10 @@ class Scenario(EntityBase):
     parameter_overrides: dict[str, Any] = Field(default_factory=dict)
     control_actions: list[ControlAction] = Field(default_factory=list)
 
+    #: Режим наблюдений для всего прогона: twin | pure_simulation.
+    #: Пусто — используется режим, заданный у каждого наблюдения.
+    observation_mode: str | None = None
+
     objective: ObjectiveSpec | None = None
     constraints: list[str] = Field(default_factory=list)
     version: int = Field(default=1, ge=1)
@@ -73,6 +90,8 @@ class Scenario(EntityBase):
 
     @model_validator(mode="after")
     def _check(self) -> "Scenario":
+        if self.observation_mode not in (None, "twin", "pure_simulation"):
+            raise ValueError("observation_mode: допустимо twin | pure_simulation")
         for kind_id, mult in self.event_rate_multipliers.items():
             if mult < 0:
                 raise ValueError(f"event rate multiplier for {kind_id} must be >= 0")

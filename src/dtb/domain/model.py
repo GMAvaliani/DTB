@@ -14,10 +14,18 @@ from typing import Any, Iterator
 from pydantic import BaseModel, ConfigDict, Field
 
 from dtb.domain.base import EntityBase
+from dtb.domain.control import (
+    ControlActionDef,
+    DecisionPoint,
+    Observation,
+    Policy,
+    Subject,
+)
 from dtb.domain.enterprise import Enterprise
 from dtb.domain.events import EventKind
 from dtb.domain.goals import Goal
 from dtb.domain.kpi import KPIDefinition
+from dtb.domain.links import Gap, GapType, Link
 from dtb.domain.resources import (
     Employee,
     Equipment,
@@ -61,6 +69,15 @@ ENTITY_COLLECTIONS: dict[str, type[EntityBase]] = {
     "erp_object": ERPObject,
     "event_kind": EventKind,
     "kpi": KPIDefinition,
+    # контур управления
+    "subject": Subject,
+    "control_action": ControlActionDef,
+    "policy": Policy,
+    "decision_point": DecisionPoint,
+    "observation": Observation,
+    # заготовки ниши (NOT IMPLEMENTED, см. dtb.domain.links)
+    "link": Link,
+    "gap_type": GapType,
 }
 
 _COLLECTION_FIELD = {
@@ -74,12 +91,24 @@ _COLLECTION_FIELD = {
     "erp_object": "erp_objects",
     "event_kind": "event_kinds",
     "kpi": "kpis",
+    "subject": "subjects",
+    "control_action": "control_actions",
+    "policy": "policies",
+    "decision_point": "decision_points",
+    "observation": "observations",
+    "link": "links",
+    "gap_type": "gap_types",
 }
+
+#: Версия схемы модели. Увеличивается при добавлении коллекций и полей,
+#: требующих миграции сохранённых снимков (см. migrate_snapshot).
+SCHEMA_VERSION = 2
 
 
 class EnterpriseModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    schema_version: int = SCHEMA_VERSION  # старые снимки поднимает migrate_snapshot
     enterprise: Enterprise
     goals: dict[str, Goal] = Field(default_factory=dict)
     utility_types: dict[str, UtilityType] = Field(default_factory=dict)
@@ -92,6 +121,16 @@ class EnterpriseModel(BaseModel):
     erp_mappings: list[ERPMapping] = Field(default_factory=list)
     event_kinds: dict[str, EventKind] = Field(default_factory=dict)
     kpis: dict[str, KPIDefinition] = Field(default_factory=dict)
+    # контур управления (МР, политики, наблюдения, действия, субъекты)
+    subjects: dict[str, Subject] = Field(default_factory=dict)
+    control_actions: dict[str, ControlActionDef] = Field(default_factory=dict)
+    policies: dict[str, Policy] = Field(default_factory=dict)
+    decision_points: dict[str, DecisionPoint] = Field(default_factory=dict)
+    observations: dict[str, Observation] = Field(default_factory=dict)
+    # заготовки ниши: хранятся и версионируются, на расчёт не влияют
+    links: dict[str, Link] = Field(default_factory=dict)
+    gap_types: dict[str, GapType] = Field(default_factory=dict)
+    gaps: list[Gap] = Field(default_factory=list)
     initial_state: InitialState = Field(default_factory=InitialState)
     # View 3/7 series per KPI id: план и факт; forecast comes from simulation.
     plans: dict[str, list[SeriesPoint]] = Field(default_factory=dict)
@@ -126,7 +165,7 @@ class EnterpriseModel(BaseModel):
 
     @classmethod
     def from_snapshot(cls, data: dict[str, Any]) -> "EnterpriseModel":
-        return cls.model_validate(data)
+        return cls.model_validate(migrate_snapshot(data))
 
     def content_hash(self) -> str:
         payload = json.dumps(self.to_snapshot(), sort_keys=True, ensure_ascii=False)
@@ -134,6 +173,40 @@ class EnterpriseModel(BaseModel):
 
     def clone(self) -> "EnterpriseModel":
         return copy.deepcopy(self)
+
+
+def migrate_snapshot(data: dict[str, Any]) -> dict[str, Any]:
+    """Поднять снимок модели до текущей версии схемы.
+
+    Снимок — это JSON-документ, поэтому «миграция БД» для модели сводится к
+    дополнению документа значениями по умолчанию: ранее сохранённые модели
+    грузятся без ошибок и получают пустые коллекции контура управления.
+    Несовместимых изменений схемы не вносилось, поэтому миграция аддитивна.
+    """
+    if not isinstance(data, dict):
+        return data
+    version = int(data.get("schema_version") or 1)
+    if version > SCHEMA_VERSION:
+        raise ValueError(
+            f"снимок модели имеет версию схемы {version}, "
+            f"поддерживается до {SCHEMA_VERSION}: обновите платформу"
+        )
+    if version < 2:
+        # v1 → v2: добавлены коллекции контура управления и заготовки ниши
+        data = dict(data)
+        for field in (
+            "subjects",
+            "control_actions",
+            "policies",
+            "decision_points",
+            "observations",
+            "links",
+            "gap_types",
+        ):
+            data.setdefault(field, {})
+        data.setdefault("gaps", [])
+        data["schema_version"] = 2
+    return data
 
 
 def apply_scenario_overrides(model: EnterpriseModel, scenario: Scenario) -> EnterpriseModel:

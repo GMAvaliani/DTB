@@ -15,6 +15,12 @@ _COLLECTIONS = (
     "erp_objects",
     "event_kinds",
     "kpis",
+    # контур управления: изменения политик и точек решений тоже видны в истории
+    "subjects",
+    "control_actions",
+    "policies",
+    "decision_points",
+    "observations",
 )
 
 

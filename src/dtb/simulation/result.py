@@ -38,6 +38,11 @@ class SimulationResult:
     # logs & stats
     event_log: list[dict[str, Any]] = field(default_factory=list)
     event_log_truncated: int = 0
+    # контур управления
+    decision_log: list[dict[str, Any]] = field(default_factory=list)
+    policy_trace: list[dict[str, Any]] = field(default_factory=list)
+    observation_error: dict[str, Any] = field(default_factory=dict)
+    rejected_actions: list[dict[str, Any]] = field(default_factory=list)
     sed_stats: dict[str, dict[str, Any]] = field(default_factory=dict)
     resource_stats: dict[str, dict[str, Any]] = field(default_factory=dict)
     utility_totals: dict[str, dict[str, float]] = field(default_factory=dict)
@@ -58,6 +63,10 @@ class SimulationResult:
             "pool_series": [[t, w, e] for t, w, e in self.pool_series],
             "event_log": self.event_log,
             "event_log_truncated": self.event_log_truncated,
+            "decision_log": self.decision_log,
+            "policy_trace": self.policy_trace,
+            "observation_error": self.observation_error,
+            "rejected_actions": self.rejected_actions,
             "sed_stats": self.sed_stats,
             "resource_stats": self.resource_stats,
             "utility_totals": self.utility_totals,
@@ -96,6 +105,10 @@ class SimulationResult:
         result.pool_series = [(p[0], p[1], p[2]) for p in data.get("pool_series", [])]
         result.event_log = data.get("event_log", [])
         result.event_log_truncated = data.get("event_log_truncated", 0)
+        result.decision_log = data.get("decision_log", [])
+        result.policy_trace = data.get("policy_trace", [])
+        result.observation_error = data.get("observation_error", {})
+        result.rejected_actions = data.get("rejected_actions", [])
         result.sed_stats = data.get("sed_stats", {})
         result.resource_stats = data.get("resource_stats", {})
         result.utility_totals = data.get("utility_totals", {})

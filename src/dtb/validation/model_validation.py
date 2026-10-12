@@ -211,6 +211,9 @@ def validate_model(model: EnterpriseModel) -> ValidationReport:
                   f"родительская орг-единица {org.parent_id!r} не существует")
     _check_hierarchy_cycles(r, {o.id: o.parent_id for o in org_units.values()}, "org_unit")
 
+    # --- контур управления ------------------------------------------------------
+    _validate_control_loop(r, model)
+
     # goals without any implementing SED → недостижимая цель
     implemented = {s.goal_id for s in seds.values() if s.goal_id}
     for goal in goals.values():
@@ -221,6 +224,106 @@ def validate_model(model: EnterpriseModel) -> ValidationReport:
             r.add(Severity.WARNING, "goal_unreachable", "goal", goal.id,
                   "цель имеет целевые показатели, но ни один СЭД её не реализует")
     return r
+
+
+def _validate_control_loop(r: ValidationReport, model: EnterpriseModel) -> None:
+    """Проверки субъектов, действий, политик, точек решений и наблюдений."""
+    actions = model.control_actions
+    policies = model.policies
+    subjects = model.subjects
+    targets = {
+        "utility_type": model.utility_types,
+        "sed": model.seds,
+        "resource": model.resources,
+        "kpi": model.kpis,
+    }
+
+    for subject in subjects.values():
+        if subject.org_unit_ref and subject.org_unit_ref not in model.org_units:
+            r.add(Severity.WARNING, "broken_ref", "subject", subject.id,
+                  f"орг-единица {subject.org_unit_ref!r} не существует")
+
+    for action in actions.values():
+        effect = action.effect
+        if effect.sed_id and effect.sed_id not in model.seds:
+            r.add(Severity.CRITICAL, "broken_ref", "control_action", action.id,
+                  f"эффект ссылается на несуществующий СЭД {effect.sed_id!r}")
+        if effect.utility_type_id and effect.utility_type_id not in model.utility_types:
+            r.add(Severity.CRITICAL, "broken_ref", "control_action", action.id,
+                  f"эффект ссылается на несуществующую полезность {effect.utility_type_id!r}")
+        if effect.resource_id and effect.resource_id not in model.resources:
+            r.add(Severity.CRITICAL, "broken_ref", "control_action", action.id,
+                  f"эффект ссылается на несуществующий ресурс {effect.resource_id!r}")
+        _check_expr(r, effect.quantity_expression, "control_action", action.id,
+                    "invalid_expression")
+        _check_expr(r, effect.condition, "control_action", action.id, "invalid_expression")
+        if action.goal_ref and action.goal_ref not in model.goals:
+            r.add(Severity.WARNING, "broken_ref", "control_action", action.id,
+                  f"цель {action.goal_ref!r} не существует")
+        if action.subject_ref and action.subject_ref not in subjects:
+            r.add(Severity.CRITICAL, "broken_ref", "control_action", action.id,
+                  f"субъект {action.subject_ref!r} не существует")
+        if action.subject_ref and action.subject_ref in subjects:
+            level = subjects[action.subject_ref].authority_level
+            if level < action.min_authority_level:
+                r.add(Severity.WARNING, "insufficient_authority", "control_action", action.id,
+                      f"полномочий субъекта {action.subject_ref!r} ({level}) не хватает "
+                      f"для действия (нужно {action.min_authority_level})")
+
+    for policy in policies.values():
+        for rule in policy.effective_rules():
+            _check_expr(r, rule.condition, "policy", policy.id, "invalid_expression")
+            _check_expr(r, rule.magnitude_expression, "policy", policy.id, "invalid_expression")
+            if not rule.action_ref:
+                r.add(Severity.CRITICAL, "missing_action", "policy", policy.id,
+                      "правило политики не указывает управляющего действия")
+            elif rule.action_ref not in actions:
+                r.add(Severity.CRITICAL, "broken_ref", "policy", policy.id,
+                      f"правило ссылается на несуществующее действие {rule.action_ref!r}")
+        if policy.subject_ref and policy.subject_ref not in subjects:
+            r.add(Severity.CRITICAL, "broken_ref", "policy", policy.id,
+                  f"субъект {policy.subject_ref!r} не существует")
+        if policy.enabled and not model.decision_points:
+            r.add(Severity.WARNING, "policy_never_invoked", "policy", policy.id,
+                  "в модели нет точек принятия решений — политика не будет вызвана")
+
+    for dp in model.decision_points.values():
+        if dp.event_ref and dp.event_ref not in model.event_kinds:
+            r.add(Severity.CRITICAL, "broken_ref", "decision_point", dp.id,
+                  f"точка решений ссылается на несуществующее событие {dp.event_ref!r}")
+        if dp.policy_ref and dp.policy_ref not in policies:
+            r.add(Severity.CRITICAL, "broken_ref", "decision_point", dp.id,
+                  f"точка решений ссылается на несуществующую политику {dp.policy_ref!r}")
+        _check_expr(r, dp.watchdog_condition, "decision_point", dp.id, "invalid_expression")
+        if dp.requires_decision and not policies:
+            r.add(Severity.WARNING, "no_policies", "decision_point", dp.id,
+                  "точка требует решения, но в модели нет ни одной политики")
+        for kind, refs in (
+            ("sed", dp.scope.sed_ids),
+            ("utility_type", dp.scope.utility_type_ids),
+            ("resource", dp.scope.resource_ids),
+        ):
+            for ref in refs:
+                if ref not in targets[kind]:
+                    r.add(Severity.WARNING, "broken_ref", "decision_point", dp.id,
+                          f"область видимости ссылается на несуществующий {kind} {ref!r}")
+
+    for obs in model.observations.values():
+        kind = obs.target_kind.value
+        if kind == "link":
+            r.add(Severity.INFO, "not_implemented", "observation", obs.id,
+                  "наблюдение за связью — заготовка, движком не используется")
+            continue
+        collection = targets.get(kind)
+        if collection is not None and obs.target_ref not in collection:
+            r.add(Severity.CRITICAL, "broken_ref", "observation", obs.id,
+                  f"наблюдение ссылается на несуществующий {kind} {obs.target_ref!r}")
+        if obs.relative_error > 1:
+            r.add(Severity.WARNING, "large_observation_error", "observation", obs.id,
+                  f"относительная погрешность {obs.relative_error:g} превышает 100%")
+        if obs.delay > 0 and obs.delay < obs.period:
+            r.add(Severity.INFO, "observation_delay", "observation", obs.id,
+                  "задержка меньше периода: оценка почти всегда актуальна")
 
 
 def validate_scenario(model: EnterpriseModel, scenario: Scenario) -> ValidationReport:
@@ -245,6 +348,11 @@ def validate_scenario(model: EnterpriseModel, scenario: Scenario) -> ValidationR
         if ev.event_kind_id not in model.event_kinds:
             r.add(Severity.CRITICAL, "broken_ref", "scenario", scenario.id,
                   f"вброшенное событие несуществующего вида {ev.event_kind_id!r}")
+    for action in scenario.control_actions:
+        if action.action_ref and action.action_ref not in model.control_actions:
+            r.add(Severity.CRITICAL, "broken_ref", "scenario", scenario.id,
+                  f"сценарное действие ссылается на несуществующее "
+                  f"управляющее действие {action.action_ref!r}")
     if scenario.objective and scenario.objective.kpi_id not in model.kpis:
         r.add(Severity.CRITICAL, "broken_ref", "scenario", scenario.id,
               f"целевая функция ссылается на несуществующий KPI {scenario.objective.kpi_id!r}")

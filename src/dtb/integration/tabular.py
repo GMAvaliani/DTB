@@ -7,6 +7,8 @@ Compact cell syntax:
 - duration: ``"fixed:4"``, ``"uniform:2..6"``, ``"triangular:2..6@4"``,
   ``"normal:5,1"``, ``"lognormal:1,0.5"``, ``"exponential:5"``
 - goal targets: ``"revenue:>=:100000"`` or ``"revenue:>=:100000:720"`` (deadline)
+- policy rules: ``"stock('steel') < 50 -> buy_steel @ 2; true -> hold"``
+  (condition ``->`` action ``@`` magnitude expression)
 - complex structures (outcome branches, event effects) are JSON cells.
 """
 
@@ -44,6 +46,19 @@ from dtb.domain import (
     UtilityKind,
     UtilityType,
 )
+from dtb.domain.control import (
+    ControlActionDef,
+    ControlLoop,
+    DecisionPoint,
+    DecisionPointKind,
+    Estimator,
+    Observation,
+    ObservationMode,
+    ObservationTarget,
+    Policy,
+    PolicyRule,
+    Subject,
+)
 from dtb.domain.model import EnterpriseModel
 from dtb.integration.base import ImportReport
 
@@ -63,6 +78,11 @@ SHEETS = [
     "erp_objects",  # view 7
     "erp_mappings",  # view 8
     "initial_state",  # view 7
+    "subjects",  # контур управления: кто действует
+    "control_actions",  # контур управления: каталог действий
+    "policies",  # контур управления: правила выбора действия
+    "decision_points",  # контур управления: когда вызывается политика
+    "observations",  # контур управления: что и как наблюдается
 ]
 
 
@@ -434,6 +454,158 @@ def _apply_initial_state(model: EnterpriseModel, row: dict[str, Any]) -> tuple[s
     return uid, is_new
 
 
+def _enum(value: Any, enum_cls, default):
+    """Безопасный разбор перечисления: неизвестное значение заменяется на default."""
+    text = _s(value)
+    return enum_cls(text) if text in enum_cls._value2member_map_ else default
+
+
+def _b(value: Any, default: bool = True) -> bool:
+    text = _s(value).lower()
+    if not text:
+        return default
+    return text not in ("0", "false", "нет", "no", "off", "ложь")
+
+
+def _apply_subject(model: EnterpriseModel, row: dict[str, Any]) -> tuple[str, bool]:
+    sid = _s(row.get("id"))
+    is_new = sid not in model.subjects
+    model.subjects[sid] = Subject(
+        id=sid,
+        name=_s(row.get("name")),
+        description=_s(row.get("description")),
+        authority_level=_i(row.get("authority_level"), 1) or 0,
+        org_unit_ref=_s(row.get("org_unit_ref")) or None,
+        role_ref=_s(row.get("role_ref")) or None,
+        external=_b(row.get("external"), False),
+    )
+    return sid, is_new
+
+
+def _apply_control_action(model: EnterpriseModel, row: dict[str, Any]) -> tuple[str, bool]:
+    aid = _s(row.get("id"))
+    is_new = aid not in model.control_actions
+    effect_raw = _json_cell(row.get("effect"))
+    if effect_raw is None:
+        raise ValueError(f"действие {aid}: требуется JSON-ячейка effect")
+    model.control_actions[aid] = ControlActionDef(
+        id=aid,
+        name=_s(row.get("name")),
+        description=_s(row.get("description")),
+        loop=_enum(row.get("loop"), ControlLoop, None),
+        effect=EventEffect.model_validate(effect_raw),
+        goal_ref=_s(row.get("goal_ref")) or None,
+        magnitude=_f(row.get("magnitude")),
+        activation_delay=_f(row.get("activation_delay"), 0.0) or 0.0,
+        one_time_cost=_f(row.get("one_time_cost"), 0.0) or 0.0,
+        recurring_cost=_f(row.get("recurring_cost"), 0.0) or 0.0,
+        term=_f(row.get("term")),
+        reversible=_b(row.get("reversible"), True),
+        success_probability=_f(row.get("success_probability"), 1.0) or 0.0,
+        min_authority_level=_i(row.get("min_authority_level"), 0) or 0,
+        subject_ref=_s(row.get("subject_ref")) or None,
+    )
+    return aid, is_new
+
+
+def parse_policy_rules(cell: Any) -> list[PolicyRule]:
+    """``"stock('x') < 5 -> add_line @ 2; true -> hold"`` либо JSON-массив."""
+    text = _s(cell)
+    if not text:
+        return []
+    if text.startswith("["):
+        return [PolicyRule.model_validate(r) for r in json.loads(text)]
+    out: list[PolicyRule] = []
+    for part in text.split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        condition, sep, tail = part.partition("->")
+        if not sep:
+            raise ValueError(f"правило политики без '->': {part!r}")
+        action, _, magnitude = tail.partition("@")
+        out.append(
+            PolicyRule(
+                condition=condition.strip() or "true",
+                action_ref=action.strip(),
+                magnitude_expression=magnitude.strip() or None,
+            )
+        )
+    return out
+
+
+def encode_policy_rules(rules: list[PolicyRule]) -> str:
+    return "; ".join(
+        f"{r.condition} -> {r.action_ref}"
+        + (f" @ {r.magnitude_expression}" if r.magnitude_expression else "")
+        for r in rules
+    )
+
+
+def _apply_policy(model: EnterpriseModel, row: dict[str, Any]) -> tuple[str, bool]:
+    pid = _s(row.get("id"))
+    is_new = pid not in model.policies
+    model.policies[pid] = Policy(
+        id=pid,
+        name=_s(row.get("name")),
+        description=_s(row.get("description")),
+        loop=_enum(row.get("loop"), ControlLoop, ControlLoop.REGULATION),
+        state_selector=_list(row.get("state_selector")),
+        rule=_s(row.get("rule")) or None,
+        action_ref=_s(row.get("action_ref")) or None,
+        rules=parse_policy_rules(row.get("rules")),
+        subject_ref=_s(row.get("subject_ref")) or None,
+        priority=_i(row.get("priority"), 100) or 100,
+        active_from=_f(row.get("active_from"), 0.0) or 0.0,
+        active_to=_f(row.get("active_to")),
+        cooldown_hours=_f(row.get("cooldown_hours")),
+        enabled=_b(row.get("enabled")),
+    )
+    return pid, is_new
+
+
+def _apply_decision_point(model: EnterpriseModel, row: dict[str, Any]) -> tuple[str, bool]:
+    did = _s(row.get("id"))
+    is_new = did not in model.decision_points
+    scope_raw = _json_cell(row.get("scope"))
+    model.decision_points[did] = DecisionPoint(
+        id=did,
+        name=_s(row.get("name")),
+        description=_s(row.get("description")),
+        kind=_enum(row.get("kind"), DecisionPointKind, DecisionPointKind.TIMER),
+        event_ref=_s(row.get("event_ref")) or None,
+        timer_period=_f(row.get("timer_period")),
+        timer_start=_f(row.get("timer_start"), 0.0) or 0.0,
+        watchdog_condition=_s(row.get("watchdog_condition")) or None,
+        requires_decision=_b(row.get("requires_decision")),
+        policy_ref=_s(row.get("policy_ref")) or None,
+        **({"scope": scope_raw} if scope_raw else {}),
+        enabled=_b(row.get("enabled")),
+    )
+    return did, is_new
+
+
+def _apply_observation(model: EnterpriseModel, row: dict[str, Any]) -> tuple[str, bool]:
+    oid = _s(row.get("id"))
+    is_new = oid not in model.observations
+    model.observations[oid] = Observation(
+        id=oid,
+        name=_s(row.get("name")),
+        description=_s(row.get("description")),
+        target_kind=_enum(row.get("target_kind"), ObservationTarget, ObservationTarget.UTILITY_TYPE),
+        target_ref=_s(row.get("target_ref")),
+        metric=_s(row.get("metric")) or None,
+        period=_f(row.get("period"), 1.0) or 1.0,
+        delay=_f(row.get("delay"), 0.0) or 0.0,
+        relative_error=_f(row.get("relative_error"), 0.0) or 0.0,
+        estimator=_enum(row.get("estimator"), Estimator, Estimator.LAST),
+        mode=_enum(row.get("mode"), ObservationMode, ObservationMode.TWIN),
+        alpha=_f(row.get("alpha"), 0.5) or 0.5,
+        enabled=_b(row.get("enabled")),
+    )
+    return oid, is_new
+
+
 def _apply_series(kind: str) -> Callable[[EnterpriseModel, dict[str, Any]], tuple[str, bool]]:
     def apply(model: EnterpriseModel, row: dict[str, Any]) -> tuple[str, bool]:
         kpi_id = _s(row.get("kpi_id") or row.get("id"))
@@ -461,6 +633,11 @@ _APPLIERS: dict[str, Callable[[EnterpriseModel, dict[str, Any]], tuple[str, bool
     "initial_state": _apply_initial_state,
     "plans": _apply_series("plans"),
     "actuals": _apply_series("actuals"),
+    "subjects": _apply_subject,
+    "control_actions": _apply_control_action,
+    "policies": _apply_policy,
+    "decision_points": _apply_decision_point,
+    "observations": _apply_observation,
 }
 
 _TYPE_NAME = {
@@ -478,6 +655,11 @@ _TYPE_NAME = {
     "initial_state": "initial_stock",
     "plans": "plan_point",
     "actuals": "actual_point",
+    "subjects": "subject",
+    "control_actions": "control_action",
+    "policies": "policy",
+    "decision_points": "decision_point",
+    "observations": "observation",
 }
 
 
@@ -583,6 +765,59 @@ def model_to_rows(model: EnterpriseModel, sheet: str) -> tuple[list[str], list[l
     elif sheet == "actuals":
         header = ["kpi_id", "t", "value"]
         rows = [[kid, p.t, p.value] for kid, pts in model.actuals.items() for p in pts]
+    elif sheet == "subjects":
+        header = ["id", "name", "description", "authority_level", "org_unit_ref",
+                  "role_ref", "external"]
+        rows = [[s.id, s.name, s.description, s.authority_level, s.org_unit_ref or "",
+                 s.role_ref or "", int(s.external)]
+                for s in model.subjects.values()]
+    elif sheet == "control_actions":
+        header = ["id", "name", "description", "loop", "effect", "goal_ref", "magnitude",
+                  "activation_delay", "one_time_cost", "recurring_cost", "term",
+                  "reversible", "success_probability", "min_authority_level", "subject_ref"]
+        rows = [
+            [a.id, a.name, a.description, a.loop.value if a.loop else "",
+             json.dumps(a.effect.model_dump(mode="json", exclude_defaults=True), ensure_ascii=False),
+             a.goal_ref or "", a.magnitude if a.magnitude is not None else "",
+             a.activation_delay, a.one_time_cost, a.recurring_cost,
+             a.term if a.term is not None else "", int(a.reversible),
+             a.success_probability, a.min_authority_level, a.subject_ref or ""]
+            for a in model.control_actions.values()
+        ]
+    elif sheet == "policies":
+        header = ["id", "name", "description", "loop", "rule", "action_ref", "rules",
+                  "state_selector", "subject_ref", "priority", "active_from", "active_to",
+                  "cooldown_hours", "enabled"]
+        rows = [
+            [p.id, p.name, p.description, p.loop.value, p.rule or "", p.action_ref or "",
+             encode_policy_rules(p.rules), "; ".join(p.state_selector), p.subject_ref or "",
+             p.priority, p.active_from, p.active_to if p.active_to is not None else "",
+             p.cooldown_hours if p.cooldown_hours is not None else "", int(p.enabled)]
+            for p in model.policies.values()
+        ]
+    elif sheet == "decision_points":
+        header = ["id", "name", "description", "kind", "event_ref", "timer_period",
+                  "timer_start", "watchdog_condition", "requires_decision", "policy_ref",
+                  "scope", "enabled"]
+        rows = [
+            [d.id, d.name, d.description, d.kind.value, d.event_ref or "",
+             d.timer_period if d.timer_period is not None else "", d.timer_start,
+             d.watchdog_condition or "", int(d.requires_decision), d.policy_ref or "",
+             "" if d.scope.all else json.dumps(
+                 d.scope.model_dump(mode="json", exclude_defaults=True), ensure_ascii=False
+             ),
+             int(d.enabled)]
+            for d in model.decision_points.values()
+        ]
+    elif sheet == "observations":
+        header = ["id", "name", "description", "target_kind", "target_ref", "metric",
+                  "period", "delay", "relative_error", "estimator", "mode", "alpha", "enabled"]
+        rows = [
+            [o.id, o.name, o.description, o.target_kind.value, o.target_ref, o.metric or "",
+             o.period, o.delay, o.relative_error, o.estimator.value, o.mode.value,
+             o.alpha, int(o.enabled)]
+            for o in model.observations.values()
+        ]
     else:
         raise KeyError(f"unknown sheet {sheet!r}")
     return header, rows
