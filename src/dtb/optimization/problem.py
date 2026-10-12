@@ -7,6 +7,11 @@ Decision variables address model/scenario parameters through typed paths:
 - ``sed_duration:<sed_id>``    — SED duration scale
 - ``stock:<utility_type_id>``  — initial utility stock
 - ``param:<entity_type>:<id>.<field>`` — arbitrary model parameter
+- ``policy:<policy_id>.<threshold>``   — порог политики контура управления
+
+Критерий сравнения кандидатов — среднее по прогонам либо нижний квантиль:
+второй отвечает на вопрос «а что в плохом случае», поэтому выбирает решения,
+устойчивые к случайности, а не удачные на среднем.
 """
 
 from __future__ import annotations
@@ -20,7 +25,9 @@ from dtb.common.expr import SafeExpression
 from dtb.domain.kpi import KPIDirection
 from dtb.domain.scenario import Scenario, SEDOverride
 
-_PREFIXES = ("resource:", "event_rate:", "sed_duration:", "stock:", "param:")
+_PREFIXES = (
+    "resource:", "event_rate:", "sed_duration:", "stock:", "param:", "policy:",
+)
 
 
 class DecisionVariable(BaseModel):
@@ -50,6 +57,17 @@ class DecisionVariable(BaseModel):
             scenario.initial_stock_overrides[ref] = value
         elif prefix == "param":
             scenario.parameter_overrides[ref] = value
+        elif prefix == "policy":
+            # policy:<id>.<порог> → параметр policy:<id>.thresholds.<порог>
+            policy_id, _, threshold = ref.partition(".")
+            if not threshold:
+                raise ValueError(
+                    f"decision variable {self.name}: путь policy: требует "
+                    f"имя порога — policy:<policy_id>.<threshold>"
+                )
+            scenario.parameter_overrides[
+                f"policy:{policy_id}.thresholds.{threshold}"
+            ] = value
         else:  # pragma: no cover — validate_path guards this
             raise ValueError(f"unknown decision path {self.path!r}")
 
@@ -63,20 +81,51 @@ class ObjectiveFunction(Protocol):
     def describe(self) -> dict[str, Any]: ...
 
 
+def quantile_of(values: list[float], q: float) -> float:
+    """Квантиль выборки линейной интерполяцией (как в Монте-Карло)."""
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    position = q * (len(ordered) - 1)
+    low = int(position)
+    high = min(low + 1, len(ordered) - 1)
+    frac = position - low
+    return ordered[low] * (1 - frac) + ordered[high] * frac
+
+
 class KPIObjective:
-    """Expected final value of one KPI (revenue, profit, cost, service level…)."""
+    """Итоговое значение KPI: среднее по прогонам либо нижний квантиль.
+
+    ``quantile=0.1`` означает «оцениваем решение по десятому процентилю»: это
+    осторожный критерий, выбирающий устойчивые решения вместо тех, что хороши
+    в среднем, но провальны в плохих прогонах.
+    """
 
     def __init__(
         self,
         kpi_id: str,
         direction: KPIDirection = KPIDirection.MAXIMIZE,
         target: float | None = None,
+        quantile: float | None = None,
     ):
         self.kpi_id = kpi_id
         self.direction = direction
         self.target = target
+        self.quantile = quantile
 
     def evaluate(self, mc: MonteCarloResult) -> float:
+        if self.quantile is not None:
+            values = mc.run_finals.get(self.kpi_id, [])
+            if values:
+                q = (
+                    self.quantile
+                    if self.direction == KPIDirection.MAXIMIZE
+                    else 1.0 - self.quantile
+                )
+                value = quantile_of(values, q)
+                return value if self.direction == KPIDirection.MAXIMIZE else -value
         mean = mc.final_kpis.get(self.kpi_id, {}).get("mean", 0.0)
         return mean if self.direction == KPIDirection.MAXIMIZE else -mean
 
@@ -86,30 +135,52 @@ class KPIObjective:
             "kpi_id": self.kpi_id,
             "direction": self.direction.value,
             "target": self.target,
+            "quantile": self.quantile,
         }
 
 
 class ExpressionObjective:
     """Custom metric: safe expression over final KPI expectations.
 
-    Context: ``kpi('<id>')`` → expected final value, ``prob('<goal_id>')`` →
-    goal achievement probability.
+    Контекст: ``kpi('<id>')`` — среднее итоговое значение,
+    ``prob('<goal_id>')`` — вероятность достижения цели,
+    ``kpi_quantile('<id>', 0.1)`` — квантиль итогового значения по прогонам,
+    ``npv()`` — средний NPV прогонов.
     """
 
-    def __init__(self, expression: str, direction: KPIDirection = KPIDirection.MAXIMIZE):
+    def __init__(
+        self,
+        expression: str,
+        direction: KPIDirection = KPIDirection.MAXIMIZE,
+        quantile: float | None = None,
+    ):
         self.expression = expression
         self.direction = direction
+        self.quantile = quantile
         self._expr = SafeExpression(expression)
 
+    def _context(self, mc: MonteCarloResult) -> dict[str, Any]:
+        def kpi(kpi_id: str) -> float:
+            if self.quantile is not None and mc.run_finals.get(kpi_id):
+                q = (
+                    self.quantile
+                    if self.direction == KPIDirection.MAXIMIZE
+                    else 1.0 - self.quantile
+                )
+                return quantile_of(mc.run_finals[kpi_id], q)
+            return mc.final_kpis.get(kpi_id, {}).get("mean", 0.0)
+
+        return {
+            "kpi": kpi,
+            "prob": lambda g: mc.goal_achievement_probability.get(g, 0.0),
+            "kpi_quantile": lambda kpi_id, q: quantile_of(
+                mc.run_finals.get(kpi_id, []), float(q)
+            ),
+            "npv": lambda: (sum(mc.run_npv) / len(mc.run_npv)) if mc.run_npv else 0.0,
+        }
+
     def evaluate(self, mc: MonteCarloResult) -> float:
-        value = float(
-            self._expr.evaluate(
-                {
-                    "kpi": lambda k: mc.final_kpis.get(k, {}).get("mean", 0.0),
-                    "prob": lambda g: mc.goal_achievement_probability.get(g, 0.0),
-                }
-            )
-        )
+        value = float(self._expr.evaluate(self._context(mc)))
         return value if self.direction == KPIDirection.MAXIMIZE else -value
 
     def describe(self) -> dict[str, Any]:
@@ -117,6 +188,7 @@ class ExpressionObjective:
             "type": "expression",
             "expression": self.expression,
             "direction": self.direction.value,
+            "quantile": self.quantile,
         }
 
 
@@ -135,6 +207,12 @@ class Constraint(BaseModel):
                 {
                     "kpi": lambda k: mc.final_kpis.get(k, {}).get("mean", 0.0),
                     "prob": lambda g: mc.goal_achievement_probability.get(g, 0.0),
+                    "kpi_quantile": lambda kpi_id, q: quantile_of(
+                        mc.run_finals.get(kpi_id, []), float(q)
+                    ),
+                    "npv": lambda: (
+                        sum(mc.run_npv) / len(mc.run_npv) if mc.run_npv else 0.0
+                    ),
                 }
             )
         )
@@ -151,10 +229,16 @@ class OptimizationProblem(BaseModel):
     runs_per_evaluation: int = Field(default=5, ge=1)
     seed: int = 0
     max_evaluations: int = Field(default=200, ge=1)
+    #: критерий сравнения: пусто — среднее, иначе квантиль (0.1 — осторожный)
+    quantile: float | None = Field(default=None, gt=0, lt=1)
 
     def build_objective(self) -> ObjectiveFunction:
         if self.objective_expression:
-            return ExpressionObjective(self.objective_expression, self.direction)
+            return ExpressionObjective(
+                self.objective_expression, self.direction, self.quantile
+            )
         if self.objective_kpi_id:
-            return KPIObjective(self.objective_kpi_id, self.direction)
+            return KPIObjective(
+                self.objective_kpi_id, self.direction, quantile=self.quantile
+            )
         raise ValueError("problem needs objective_kpi_id or objective_expression")

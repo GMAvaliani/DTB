@@ -686,6 +686,25 @@ async function vResults(main) {
                 })))
             : null));
       }
+      // просмотр вперёд: сравнение кандидатов на коротком горизонте
+      try {
+        const look = await API.get(`/simulations/${simId}/lookahead?limit=50`);
+        if (look.decisions) {
+          content.append(card("Просмотр вперёд",
+            el("p", { class: "small muted" },
+              `Решений с просмотром: ${look.decisions}, из них применено действие: ` +
+              `${look.fired}. Кандидаты сравниваются короткими прогонами из клона ` +
+              "состояния на общих случайных числах."),
+            dataTable(["Время", "Политика", "Критерий", "Глубина, ч", "Кандидаты",
+              "Выбрано", "Выигрыш против «ничего не делать»"],
+              look.lookahead_log.map(e => ({
+                cells: [fmtT(e.t), e.policy, e.criterion, e.horizon,
+                  (e.scores || []).map(sc => `${sc.action || "—"}: ${fmt(sc.score)}`).join("; "),
+                  e.fired ? (e.action || "—") : "не применено",
+                  fmt(e.gain_vs_noop)],
+              })))));
+        }
+      } catch (e) { /* просмотр вперёд необязателен */ }
       // верификация прогона: инварианты на его собственных данных
       try {
         const ver = await API.get(`/simulations/${simId}/verification`);
@@ -926,6 +945,14 @@ async function vOptimize(main) {
   const consTa = el("textarea", { style: "min-height:56px", placeholder: "по одному выражению на строку, напр. kpi('service_level') >= 75" });
   const runsInp = el("input", { type: "number", value: 5, min: 1, max: 50, style: "width:80px" });
   const seedInp = el("input", { type: "number", value: 7, style: "width:110px" });
+  const optSel = el("select", null,
+    el("option", { value: "grid_search" }, "полный перебор"),
+    el("option", { value: "coordinate_search" }, "покоординатный поиск"),
+    el("option", { value: "random_search" }, "случайный поиск"));
+  const qInp = el("input", {
+    type: "number", value: "", step: "0.05", min: "0.01", max: "0.99",
+    placeholder: "среднее", style: "width:110px",
+  });
   const content = el("div");
   main.append(card("Задача оптимизации",
     el("div", { class: "row" },
@@ -933,8 +960,13 @@ async function vOptimize(main) {
       el("div", null, el("label", null, "Целевая функция (KPI)"), kpiSel),
       el("div", null, el("label", null, "Направление"), dirSel),
       el("div", null, el("label", null, "Прогонов на оценку"), runsInp),
-      el("div", null, el("label", null, "Seed"), seedInp)),
-    el("label", null, "Переменные решения (пути: resource:<id> | event_rate:<id> | sed_duration:<id> | stock:<id> | param:<тип>:<id>.<поле>)"),
+      el("div", null, el("label", null, "Seed"), seedInp),
+      el("div", null, el("label", null, "Метод"), optSel),
+      el("div", null, el("label", null, "Критерий: квантиль"), qInp)),
+    el("p", { class: "small muted" },
+      "Пустой квантиль — сравнение по среднему. Значение 0,1 означает оценку по " +
+      "десятому процентилю: осторожный выбор, устойчивый к случайности."),
+    el("label", null, "Переменные решения (пути: resource:<id> | event_rate:<id> | sed_duration:<id> | stock:<id> | param:<тип>:<id>.<поле> | policy:<id>.<порог>)"),
     varsTa,
     el("label", null, "Ограничения"),
     consTa,
@@ -950,6 +982,8 @@ async function vOptimize(main) {
         scenario_id: scnSel.value, variables, objective_kpi_id: kpiSel.value,
         direction: dirSel.value, constraints,
         runs_per_evaluation: parseInt(runsInp.value) || 5, seed: parseInt(seedInp.value) || 0,
+        optimizer: optSel.value,
+        quantile: qInp.value ? parseFloat(qInp.value) : null,
       });
       toast("Оптимизация запущена: " + r.id, "ok");
       poll(r.id);

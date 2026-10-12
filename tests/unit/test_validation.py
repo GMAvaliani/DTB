@@ -321,3 +321,68 @@ def test_exception_beyond_horizon_is_warning(small_model):
     )
     report = validate_model(small_model)
     assert any(i.code == "exception_outside_horizon" for i in report.issues)
+
+
+# ----------------------------- пороги и просмотр вперёд (фаза 6) --
+
+
+def test_missing_threshold_is_critical(small_model):
+    from dtb.domain.control import Policy
+
+    _with_action(small_model)
+    small_model.policies["p"] = Policy(
+        id="p", name="p", rule="stock('material') < threshold('low')",
+        action_ref="add_line",
+    )
+    report = validate_model(small_model)
+    assert any(i.code == "missing_threshold" for i in report.critical)
+
+
+def test_unused_threshold_is_info(small_model):
+    from dtb.domain.control import Policy
+
+    _with_action(small_model)
+    small_model.policies["p"] = Policy(
+        id="p", name="p", rule="true", action_ref="add_line",
+        thresholds={"unused": 1.0},
+    )
+    report = validate_model(small_model)
+    assert any(i.code == "unused_threshold" for i in report.issues)
+    assert report.ok_to_simulate
+
+
+def test_lookahead_unknown_candidate_is_critical(small_model):
+    from dtb.domain.control import Lookahead, Policy
+
+    _with_action(small_model)
+    small_model.policies["p"] = Policy(
+        id="p", name="p", rule="true", action_ref="add_line",
+        lookahead=Lookahead(horizon=24.0, candidates=["ghost"]),
+    )
+    assert not validate_model(small_model).ok_to_simulate
+
+
+def test_lookahead_single_run_quantile_is_warning(small_model):
+    from dtb.domain.control import Lookahead, LookaheadCriterion, Policy
+
+    _with_action(small_model)
+    small_model.policies["p"] = Policy(
+        id="p", name="p", rule="true", action_ref="add_line",
+        lookahead=Lookahead(
+            horizon=24.0, runs=1, criterion=LookaheadCriterion.QUANTILE
+        ),
+    )
+    report = validate_model(small_model)
+    assert any(i.code == "lookahead_single_run" for i in report.issues)
+
+
+def test_lookahead_deeper_than_horizon_is_warning(small_model):
+    from dtb.domain.control import Lookahead, Policy
+
+    _with_action(small_model)
+    small_model.policies["p"] = Policy(
+        id="p", name="p", rule="true", action_ref="add_line",
+        lookahead=Lookahead(horizon=10_000.0),
+    )
+    report = validate_model(small_model)
+    assert any(i.code == "lookahead_too_deep" for i in report.issues)

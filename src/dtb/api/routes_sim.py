@@ -466,6 +466,20 @@ def simulation_rejected_actions(request: Request, sim_id: str) -> dict[str, Any]
     }
 
 
+@router.get("/simulations/{sim_id}/lookahead", dependencies=[VIEW])
+def simulation_lookahead(request: Request, sim_id: str, limit: int = 500) -> dict[str, Any]:
+    """Журнал просмотра вперёд: кандидаты, их оценки и выбранное действие."""
+    record = _record_or_404(ctx(request), sim_id)
+    result = _sample_result(record)
+    log = result.lookahead_log
+    return {
+        "lookahead_log": log[: min(limit, len(log))],
+        "decisions": len(log),
+        "fired": sum(1 for e in log if e.get("fired")),
+        "truncated": len(log) > limit,
+    }
+
+
 @router.get("/simulations/{sim_id}/observation-error", dependencies=[VIEW])
 def simulation_observation_error(request: Request, sim_id: str) -> dict[str, Any]:
     """Погрешность наблюдения по компонентам состояния: |Y − Ŷ| за прогон."""
@@ -570,6 +584,9 @@ class OptimizationRequest(BaseModel):
     runs_per_evaluation: int = Field(default=5, ge=1, le=100)
     seed: int = 0
     optimizer: str = "grid_search"
+    #: критерий: пусто — среднее по прогонам, 0.1 — нижний квантиль
+    quantile: float | None = Field(default=None, gt=0, lt=1)
+    max_evaluations: int = Field(default=200, ge=1, le=2000)
     label: str = ""
 
 
@@ -587,6 +604,8 @@ def start_optimization(request: Request, body: OptimizationRequest) -> dict[str,
             constraints=[Constraint(expression=c) for c in body.constraints],
             runs_per_evaluation=body.runs_per_evaluation,
             seed=body.seed,
+            quantile=body.quantile,
+            max_evaluations=body.max_evaluations,
         )
         problem.build_objective()
         for var in problem.variables:

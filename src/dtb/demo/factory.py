@@ -58,6 +58,8 @@ from dtb.domain.control import (
     DecisionPoint,
     DecisionPointKind,
     Estimator,
+    Lookahead,
+    LookaheadCriterion,
     Observation,
     ObservationTarget,
     Policy,
@@ -606,7 +608,9 @@ def _add_control_loop(m: EnterpriseModel) -> None:
         description="Если на сборку ждёт три и более задания — сверхурочная смена",
         loop=ControlLoop.REGULATION, subject_ref="shift_supervisor",
         state_selector=["waiting_count('production')"],
-        rule="waiting_count('production') >= 3", action_ref="overtime_shift",
+        rule="waiting_count('production') >= threshold('queue')",
+        thresholds={"queue": 3.0},  # порог подбирается оптимизатором
+        action_ref="overtime_shift",
         cooldown_hours=48, priority=10,
     )
     m.policies["pol_second_shift"] = Policy(
@@ -614,7 +618,9 @@ def _add_control_loop(m: EnterpriseModel) -> None:
         description="Если наблюдаемая загрузка линий выше 70% — набираем бригаду",
         loop=ControlLoop.ORGANIZATION, subject_ref="plant_manager",
         state_selector=["utilization('production_line')"],
-        rule="utilization('production_line') >= 0.7", action_ref="second_shift_crew",
+        rule="utilization('production_line') >= threshold('load')",
+        thresholds={"load": 0.7},
+        action_ref="second_shift_crew",
         cooldown_hours=336, priority=20,
     )
     m.policies["pol_invest"] = Policy(
@@ -624,6 +630,22 @@ def _add_control_loop(m: EnterpriseModel) -> None:
         state_selector=["utilization('production_line')", "stock('money')"],
         rule="utilization('production_line') >= 0.6 and stock('money') >= 800000",
         action_ref="third_line", cooldown_hours=480, priority=30,
+    )
+
+    # пример политики с просмотром вперёд: по умолчанию выключена, чтобы
+    # базовый прогон оставался быстрым, но её можно включить одним полем
+    m.policies["pol_lookahead_invest"] = Policy(
+        id="pol_lookahead_invest", name="Развитие: выбор по просмотру вперёд",
+        description="Сравнивает сверхурочную смену, бригаду и новую линию "
+        "короткими прогонами по NPV и выбирает лучшее",
+        loop=ControlLoop.DEVELOPMENT, subject_ref="ceo", enabled=False,
+        rule="true", action_ref="third_line", priority=40,
+        lookahead=Lookahead(
+            horizon=240.0, objective="npv", maximize=True, runs=3,
+            criterion=LookaheadCriterion.QUANTILE, quantile=0.25,
+            candidates=["overtime_shift", "second_shift_crew", "third_line"],
+            min_gain=50_000.0,
+        ),
     )
 
     m.decision_points["dp_shift"] = DecisionPoint(

@@ -224,3 +224,58 @@ def test_csv_calendar_compact_syntax(small_model):
     assert len(calendar.exceptions) == 2
     assert calendar.exceptions[0].working is False
     assert calendar.exceptions[1].working is True
+
+
+def test_excel_roundtrip_policy_thresholds_and_lookahead(small_model):
+    """Фаза 6: пороги и просмотр вперёд переносятся через Excel."""
+    from dtb.domain import EffectKind, EventEffect
+    from dtb.domain.control import ControlActionDef, Lookahead, LookaheadCriterion, Policy
+
+    small_model.control_actions["add_line"] = ControlActionDef(
+        id="add_line", name="Линия",
+        effect=EventEffect(
+            kind=EffectKind.RESOURCE_CAPACITY_DELTA, resource_id="line", delta=1
+        ),
+    )
+    small_model.policies["pol"] = Policy(
+        id="pol", name="Регулирование",
+        rule="waiting_count('production') >= threshold('queue')",
+        action_ref="add_line", thresholds={"queue": 3.0, "load": 0.85},
+        lookahead=Lookahead(
+            horizon=48.0, objective="npv", runs=3,
+            criterion=LookaheadCriterion.QUANTILE, quantile=0.2, min_gain=100.0,
+        ),
+    )
+    target = EnterpriseModel(enterprise=Enterprise(id="copy", name="Copy"))
+    report = import_workbook(target, export_workbook(small_model))
+    assert report.ok, report.errors
+    policy = target.policies["pol"]
+    assert policy.thresholds == {"queue": 3.0, "load": 0.85}
+    assert policy.lookahead is not None
+    assert policy.lookahead.horizon == 48.0
+    assert policy.lookahead.runs == 3
+    assert policy.lookahead.criterion.value == "quantile"
+    assert policy.lookahead.quantile == 0.2
+    assert policy.lookahead.min_gain == 100.0
+
+
+def test_csv_thresholds_compact_syntax(small_model):
+    from dtb.integration import import_csv
+    from dtb.domain import EffectKind, EventEffect
+    from dtb.domain.control import ControlActionDef
+
+    small_model.control_actions["add_line"] = ControlActionDef(
+        id="add_line", name="Линия",
+        effect=EventEffect(
+            kind=EffectKind.RESOURCE_CAPACITY_DELTA, resource_id="line", delta=1
+        ),
+    )
+    report = import_csv(
+        small_model,
+        "policies",
+        "id,name,rule,action_ref,thresholds\n"
+        "p1,Порог,\"waiting_count('production') >= threshold('queue')\","
+        "add_line,\"queue:4; load:0,9\"\n",
+    )
+    assert report.ok, report.errors
+    assert small_model.policies["p1"].thresholds == {"queue": 4.0, "load": 0.9}

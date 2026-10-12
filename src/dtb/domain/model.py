@@ -180,7 +180,17 @@ class EnterpriseModel(BaseModel):
         return cls.model_validate(migrate_snapshot(data))
 
     def content_hash(self) -> str:
-        payload = json.dumps(self.to_snapshot(), sort_keys=True, ensure_ascii=False)
+        """Хеш содержания модели без служебных отметок времени.
+
+        Момент создания записи о предприятии к содержанию деятельности не
+        относится: две структурно одинаковые модели обязаны иметь одинаковый
+        хеш, иначе provenance прогонов нельзя сравнивать между собой.
+        """
+        snapshot = self.to_snapshot()
+        enterprise = dict(snapshot.get("enterprise", {}))
+        enterprise.pop("created_at", None)
+        snapshot["enterprise"] = enterprise
+        payload = json.dumps(snapshot, sort_keys=True, ensure_ascii=False)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
     def clone(self) -> "EnterpriseModel":
@@ -289,7 +299,7 @@ def _read_parameter(model: EnterpriseModel, path: str) -> Any:
             raise KeyError(f"parameter path {path!r}: entity not found")
         target: Any = entity
         for part in field.split("."):
-            target = getattr(target, part)
+            target = target[part] if isinstance(target, dict) else getattr(target, part)
         return target
     return getattr(model.enterprise, path)
 
@@ -304,7 +314,11 @@ def _apply_parameter(model: EnterpriseModel, path: str, value: Any) -> None:
         target: Any = entity
         parts = field.split(".")
         for part in parts[:-1]:
-            target = getattr(target, part)
-        setattr(target, parts[-1], value)
+            target = target[part] if isinstance(target, dict) else getattr(target, part)
+        if isinstance(target, dict):
+            # словарные поля (например, пороги политики) адресуются по ключу
+            target[parts[-1]] = value
+        else:
+            setattr(target, parts[-1], value)
     else:
         setattr(model.enterprise, path, value)

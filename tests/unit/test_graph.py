@@ -73,7 +73,7 @@ def test_control_loop_is_projected_into_graph():
 
     g = project_model(build_demo_model())
     stats = g.stats()
-    assert stats["nodes"]["policy"] == 3
+    assert stats["nodes"]["policy"] == len(build_demo_model().policies)
     assert stats["nodes"]["decision_point"] == 4
     assert stats["relations"]["DECIDES"] >= 6
     assert stats["relations"]["OBSERVES"] == 4

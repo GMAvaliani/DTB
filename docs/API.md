@@ -91,6 +91,7 @@ GET  /simulations/{id}/bottlenecks
 GET  /simulations/{id}/decisions            журнал МР: триггеры + интервал
 GET  /simulations/{id}/policy-trace[?policy_id=]  вызовы политик по контурам
 GET  /simulations/{id}/observation-error    |Y − Ŷ| по компонентам состояния
+GET  /simulations/{id}/lookahead            просмотр вперёд: кандидаты и оценки
 GET  /simulations/{id}/rejected-actions     отклонённые и неудавшиеся действия
                                             + стоимость управления по контурам
 GET  /simulations/{id}/economics            NPV, статьи, разогрев
@@ -109,13 +110,20 @@ GET  /simulations/compare?ids=a,b  сравнение (первый — baseline
 ## Прогноз и оптимизация
 
 ```
+Пути переменных решения: `resource:<id>`, `event_rate:<id>`,
+`sed_duration:<id>`, `stock:<id>`, `param:<тип>:<id>.<поле>`,
+`policy:<policy_id>.<порог>` (порог политики контура управления).
+
+```
 GET  /forecasts?scenario_id=[&simulation_id=]   Вид 3: факт/план/прогноз+CI,
                                                 P(цели), bottlenecks, ресурсы
 GET  /forecasts/deviations?scenario_id=         причины отклонений
 POST /optimizations                {scenario_id, variables[], objective_kpi_id
                                     | objective_expression, direction,
                                     constraints[], runs_per_evaluation, seed,
-                                    optimizer} → 202
+                                    optimizer: grid_search | random_search |
+                                    coordinate_search, quantile, max_evaluations}
+                                    → 202
 GET  /optimizations/{id}
 ```
 

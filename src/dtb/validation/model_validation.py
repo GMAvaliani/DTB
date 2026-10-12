@@ -320,6 +320,35 @@ def _validate_control_loop(r: ValidationReport, model: EnterpriseModel) -> None:
         if policy.subject_ref and policy.subject_ref not in subjects:
             r.add(Severity.CRITICAL, "broken_ref", "policy", policy.id,
                   f"субъект {policy.subject_ref!r} не существует")
+        for name in _thresholds_used(policy):
+            if name not in policy.thresholds:
+                r.add(Severity.CRITICAL, "missing_threshold", "policy", policy.id,
+                      f"условие ссылается на порог {name!r}, которого нет в thresholds")
+        for name in policy.thresholds:
+            if name not in _thresholds_used(policy):
+                r.add(Severity.INFO, "unused_threshold", "policy", policy.id,
+                      f"порог {name!r} задан, но в условиях не используется")
+        if policy.lookahead is not None:
+            spec = policy.lookahead
+            _check_expr(r, spec.objective, "policy", policy.id, "invalid_expression")
+            for action_ref in spec.candidates:
+                if action_ref not in actions:
+                    r.add(Severity.CRITICAL, "broken_ref", "policy", policy.id,
+                          f"просмотр вперёд ссылается на несуществующее "
+                          f"действие {action_ref!r}")
+            if not spec.candidates and not any(
+                rule.action_ref for rule in policy.effective_rules()
+            ):
+                r.add(Severity.CRITICAL, "no_candidates", "policy", policy.id,
+                      "просмотр вперёд не имеет кандидатов: укажите candidates "
+                      "либо действия в правилах")
+            if spec.runs == 1 and spec.criterion.value in ("quantile", "worst", "best"):
+                r.add(Severity.WARNING, "lookahead_single_run", "policy", policy.id,
+                      f"критерий {spec.criterion.value} по одному прогону совпадает "
+                      f"со средним: увеличьте runs")
+            if spec.horizon > model.enterprise.planning_horizon_hours:
+                r.add(Severity.WARNING, "lookahead_too_deep", "policy", policy.id,
+                      "глубина просмотра больше горизонта планирования")
         if policy.enabled and not model.decision_points:
             r.add(Severity.WARNING, "policy_never_invoked", "policy", policy.id,
                   "в модели нет точек принятия решений — политика не будет вызвана")
@@ -361,6 +390,26 @@ def _validate_control_loop(r: ValidationReport, model: EnterpriseModel) -> None:
         if obs.delay > 0 and obs.delay < obs.period:
             r.add(Severity.INFO, "observation_delay", "observation", obs.id,
                   "задержка меньше периода: оценка почти всегда актуальна")
+
+
+def _thresholds_used(policy: Any) -> set[str]:
+    """Имена порогов, встречающиеся в условиях политики как threshold('имя')."""
+    import re
+
+    names: set[str] = set()
+    sources = [rule.condition for rule in policy.effective_rules()]
+    sources += [
+        rule.magnitude_expression
+        for rule in policy.effective_rules()
+        if rule.magnitude_expression
+    ]
+    if policy.lookahead is not None:
+        sources.append(policy.lookahead.objective)
+    for source in sources:
+        if not source:
+            continue
+        names.update(re.findall(r"threshold\(\s*['\"]([^'\"]+)['\"]\s*\)", source))
+    return names
 
 
 def _validate_calendars(r: ValidationReport, model: EnterpriseModel) -> None:

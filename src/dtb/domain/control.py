@@ -112,6 +112,39 @@ class PolicyRule(BaseModel):
     magnitude_expression: str | None = None  # переопределение величины
 
 
+class LookaheadCriterion(str, Enum):
+    MEAN = "mean"  # среднее по прогонам
+    QUANTILE = "quantile"  # нижний квантиль: осторожный выбор
+    BEST = "best"  # лучший исход: оптимистичный выбор
+    WORST = "worst"  # худший исход: гарантированный результат
+
+
+class Lookahead(BaseModel):
+    """Просмотр вперёд: выбор действия по коротким прогонам из текущего состояния.
+
+    В момент принятия решений движок клонирует состояние и прогоняет каждого
+    кандидата на ``horizon`` часов вперёд, после чего сравнивает их по
+    критерию. Первый прогон продолжает ту же случайность, что и основной (это
+    общие случайные числа для всех кандидатов), остальные берут независимые
+    субпотоки, выведенные из master seed, поэтому выбор воспроизводим.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    horizon: float = Field(gt=0)  # глубина просмотра, ч
+    objective: str = "kpi"  # выражение: kpi('id'), npv, stock('id') …
+    maximize: bool = True
+    runs: int = Field(default=1, ge=1)  # сколько будущих просматривать
+    criterion: LookaheadCriterion = LookaheadCriterion.MEAN
+    quantile: float = Field(default=0.1, gt=0, lt=1)  # для criterion=quantile
+    #: действия-кандидаты; пусто — действия из правил политики
+    candidates: list[str] = Field(default_factory=list)
+    #: сравнивать ли вариант «ничего не делать»
+    include_noop: bool = True
+    #: минимальное превосходство над «ничего не делать», чтобы действие приняли
+    min_gain: float = Field(default=0.0, ge=0)
+
+
 class Policy(EntityBase):
     """Правило выбора управляющего действия, декларативное, не код."""
 
@@ -120,6 +153,11 @@ class Policy(EntityBase):
     rule: str | None = None  # простая форма: условие …
     action_ref: str | None = None  # … и применяемое действие
     rules: list[PolicyRule] = Field(default_factory=list)  # расширенная форма
+    #: пороги политики: условия ссылаются на них как ``threshold('имя')``,
+    #: а оптимизатор подбирает их значения (путь policy:<id>.<имя>)
+    thresholds: dict[str, float] = Field(default_factory=dict)
+    #: просмотр вперёд: выбор действия по коротким прогонам
+    lookahead: Lookahead | None = None
     subject_ref: str | None = None
     priority: int = 100  # меньше — раньше
     active_from: float = Field(default=0.0, ge=0)

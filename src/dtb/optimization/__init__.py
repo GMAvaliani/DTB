@@ -2,10 +2,12 @@
 
 Follows the source spec: for practically complex models the objective
 J(i; x) is evaluated algorithmically via Monte-Carlo simulation rather than
-analytically. MVP ships grid search and random search over decision variables
-(resource characteristics, event rates, SED parameters, initial stocks) with a
-plugin interface for future optimizers (dynamic programming over МП steps,
-stochastic/evolutionary/RL — see ROADMAP.md).
+analytically. Поставляются полный перебор, случайный поиск и покоординатный спуск по
+переменным решения (характеристики ресурсов, интенсивности событий, параметры
+СЭД, начальные запасы, **пороги политик контура управления**). Критерий —
+среднее по прогонам либо нижний квантиль (осторожный выбор). Интерфейс
+оптимизатора открыт для расширения (динамическое программирование по шагам
+МП, эволюционные методы, RL — см. ROADMAP.md).
 """
 
 from dtb.optimization.problem import (
@@ -15,8 +17,10 @@ from dtb.optimization.problem import (
     KPIObjective,
     ObjectiveFunction,
     OptimizationProblem,
+    quantile_of,
 )
 from dtb.optimization.optimizers import (
+    CoordinateSearchOptimizer,
     GridSearchOptimizer,
     OptimizationResult,
     Optimizer,
@@ -35,6 +39,8 @@ __all__ = [
     "Optimizer",
     "GridSearchOptimizer",
     "RandomSearchOptimizer",
+    "CoordinateSearchOptimizer",
+    "quantile_of",
     "OptimizationResult",
     "register_optimizer",
     "get_optimizer",

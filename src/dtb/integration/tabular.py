@@ -9,6 +9,8 @@ Compact cell syntax:
 - goal targets: ``"revenue:>=:100000"`` or ``"revenue:>=:100000:720"`` (deadline)
 - policy rules: ``"stock('steel') < 50 -> buy_steel @ 2; true -> hold"``
   (condition ``->`` action ``@`` magnitude expression)
+- policy thresholds: ``"queue:3; load:0.8"`` (referenced in conditions as
+  ``threshold('queue')``, tuned by the optimizer via ``policy:<id>.<name>``)
 - calendar shifts: ``"пн-пт:8-20; сб:9-14@0.5"`` (days ``:`` hours ``@`` capacity
   factor; days may be omitted for «every day», named ``пн…вс`` or numbered 0–6)
 - calendar exceptions: ``"600-648; 1000-1008:работа"`` (model-time interval;
@@ -61,6 +63,7 @@ from dtb.domain.economics import (
     EconomicsSettings,
 )
 from dtb.domain.control import (
+    Lookahead,
     ControlActionDef,
     ControlLoop,
     DecisionPoint,
@@ -564,6 +567,27 @@ def encode_policy_rules(rules: list[PolicyRule]) -> str:
     )
 
 
+def parse_thresholds(cell: Any) -> dict[str, float]:
+    """``"queue:3; load:0.8"`` либо JSON-объект порогов политики."""
+    text = _s(cell)
+    if not text:
+        return {}
+    if text.startswith("{"):
+        return {str(k): float(v) for k, v in json.loads(text).items()}
+    out: dict[str, float] = {}
+    for part in text.split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        name, _, value = part.partition(":")
+        out[name.strip()] = float(value.strip().replace(",", "."))
+    return out
+
+
+def encode_thresholds(thresholds: dict[str, float]) -> str:
+    return "; ".join(f"{k}:{v:g}" for k, v in sorted(thresholds.items()))
+
+
 def _apply_policy(model: EnterpriseModel, row: dict[str, Any]) -> tuple[str, bool]:
     pid = _s(row.get("id"))
     is_new = pid not in model.policies
@@ -581,6 +605,12 @@ def _apply_policy(model: EnterpriseModel, row: dict[str, Any]) -> tuple[str, boo
         active_from=_f(row.get("active_from"), 0.0) or 0.0,
         active_to=_f(row.get("active_to")),
         cooldown_hours=_f(row.get("cooldown_hours")),
+        thresholds=parse_thresholds(row.get("thresholds")),
+        lookahead=(
+            Lookahead.model_validate(_json_cell(row.get("lookahead")))
+            if _s(row.get("lookahead"))
+            else None
+        ),
         enabled=_b(row.get("enabled")),
     )
     return pid, is_new
@@ -975,11 +1005,16 @@ def model_to_rows(model: EnterpriseModel, sheet: str) -> tuple[list[str], list[l
         ]
     elif sheet == "policies":
         header = ["id", "name", "description", "loop", "rule", "action_ref", "rules",
-                  "state_selector", "subject_ref", "priority", "active_from", "active_to",
-                  "cooldown_hours", "enabled"]
+                  "thresholds", "lookahead", "state_selector", "subject_ref", "priority",
+                  "active_from", "active_to", "cooldown_hours", "enabled"]
         rows = [
             [p.id, p.name, p.description, p.loop.value, p.rule or "", p.action_ref or "",
-             encode_policy_rules(p.rules), "; ".join(p.state_selector), p.subject_ref or "",
+             encode_policy_rules(p.rules), encode_thresholds(p.thresholds),
+             json.dumps(
+                 p.lookahead.model_dump(mode="json", exclude_defaults=True),
+                 ensure_ascii=False,
+             ) if p.lookahead else "",
+             "; ".join(p.state_selector), p.subject_ref or "",
              p.priority, p.active_from, p.active_to if p.active_to is not None else "",
              p.cooldown_hours if p.cooldown_hours is not None else "", int(p.enabled)]
             for p in model.policies.values()

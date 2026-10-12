@@ -42,3 +42,22 @@ def test_demo_model_deterministic():
     r2 = simulate(model, base, seed=base.seed)
     assert r1.content_digest() == r2.content_digest()
     assert r1.status == "completed"
+
+
+def test_structurally_identical_models_hash_the_same():
+    """Служебная отметка времени не влияет на хеш содержания модели.
+
+    Иначе две одинаковые модели, созданные в разные секунды, давали бы разные
+    provenance, и воспроизводимость нельзя было бы проверить сравнением.
+    """
+    first = build_small_model()
+    second = build_small_model()
+    second.enterprise.created_at = "2000-01-01T00:00:00+00:00"
+    assert first.content_hash() == second.content_hash()
+
+
+def test_model_hash_still_reacts_to_content():
+    first = build_small_model()
+    second = build_small_model()
+    second.resources["line"].capacity = 99
+    assert first.content_hash() != second.content_hash()

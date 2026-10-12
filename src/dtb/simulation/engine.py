@@ -34,6 +34,8 @@ from dtb.common.seeding import derive_seed, substream
 from dtb.domain.base import utcnow_iso
 from dtb.domain.control import (
     ControlActionDef,
+    Lookahead,
+    LookaheadCriterion,
     ObservationMode,
     Policy,
     PolicyRule,
@@ -234,6 +236,10 @@ class SimulationEngine:
             if calendar is not None and calendar.enabled:
                 self._resource_calendar[res.id] = calendar
         self._priority_wait: set[str] = set()  # экземпляры, ждущие возврата ресурса
+        #: признак прогона-просмотра: внутри него просмотр вперёд отключён,
+        #: чтобы рекурсия не разрасталась
+        self._in_lookahead = False
+        self._lookahead_log: list[dict[str, Any]] = []
         self._restarted = 0
         self._failed_instances = 0
         # trigger indexes
@@ -864,10 +870,27 @@ class SimulationEngine:
         )
         self._last_decision_time = t
 
+    def _policy_context(self, policy: Policy) -> dict[str, Any]:
+        """Контекст политики: наблюдаемое состояние плюс её пороги."""
+        context = self._decision_context()
+        thresholds = policy.thresholds
+
+        def threshold(name: str) -> float:
+            if name not in thresholds:
+                raise ExpressionError(
+                    f"политика {policy.id}: порог {name!r} не задан в thresholds"
+                )
+            return float(thresholds[name])
+
+        context["threshold"] = threshold
+        return context
+
     def _evaluate_policy(self, policy: Policy, dp, trig: DecisionTrigger) -> int:
         """Проверить правила политики и применить действие при истинном условии."""
-        context = self._decision_context()
+        context = self._policy_context(policy)
         applied = 0
+        if policy.lookahead is not None and not self._in_lookahead:
+            return self._evaluate_policy_with_lookahead(policy, dp, trig, context)
         for rule in policy.effective_rules():
             try:
                 fired = bool(self._eval_in_context(rule.condition, context))
@@ -916,6 +939,194 @@ class SimulationEngine:
             self._policy_trace.append(entry)
             if fired:
                 break  # первая сработавшая ветвь правила
+        return applied
+
+    # ---------------------------------------------- просмотр вперёд (фаза 6) --
+
+    def _clone_for_lookahead(self, horizon: float, stream_seed: int | None) -> "SimulationEngine":
+        """Клон движка для короткого прогона из текущего состояния.
+
+        Клонируются модель (её могли менять управляющие действия), состояние,
+        генераторы потоков, слой наблюдений и расписание решений. Телеметрия,
+        управление прогоном и журналы в клоне не нужны: он живёт одну оценку.
+
+        ``stream_seed=None`` продолжает ту же случайность, что и основной
+        прогон, — это общие случайные числа для всех кандидатов. Иначе потоки
+        пересобираются на субпотоках указанного сида: так просматриваются
+        независимые будущие.
+        """
+        import copy
+
+        clone = copy.copy(self)  # неглубокая копия: ссылки заменяем ниже
+        clone.model = copy.deepcopy(self.model)
+        clone.state = copy.deepcopy(self.state)
+        clone.observations = copy.deepcopy(self.observations)
+        clone.decisions = copy.deepcopy(self.decisions)
+        clone.economics = copy.deepcopy(self.economics)
+        clone._policy_cooldown = dict(self._policy_cooldown)
+        clone._pending_event_decisions = list(self._pending_event_decisions)
+        clone._pending_activations = copy.deepcopy(self._pending_activations)
+        clone._pending_reversions = copy.deepcopy(self._pending_reversions)
+        clone._priority_wait = set(self._priority_wait)
+        clone._applied_by_policy_at = set(self._applied_by_policy_at)
+        clone._injected = copy.deepcopy(self._injected)
+        clone._sched_triggers = list(self._sched_triggers)
+        clone._controls = list(self._controls)
+        clone._resource_calendar = self._resource_calendar
+        clone._decision_log = []
+        clone._policy_trace = []
+        clone._rejected_actions = []
+        clone._lookahead_log = []
+        clone._log = []
+        clone._log_dropped = 0
+        clone._kpi_series = {k: [] for k in self.model.kpis}
+        clone._stock_series = {u: [] for u in self.model.utility_types}
+        clone._pool_series = []
+        clone._last_record_t = None
+        clone._warmup_report = {"hours": 0.0, "applied": True}  # разогрев уже прошёл
+        clone._warmup_hours = 0.0
+        clone.progress_cb = None
+        clone.control = SimControl()
+        clone._in_lookahead = True
+        clone.horizon = min(self.horizon, self.state.time + horizon)
+        if stream_seed is None:
+            clone._samplers = copy.deepcopy(self._samplers)
+        else:
+            clone._samplers = {}
+            for kind_id, kind in sorted(clone.model.event_kinds.items()):
+                sampler = build_sampler(
+                    kind_id, kind.stream, clone.horizon,
+                    substream(stream_seed, "stream", kind_id), self.registry,
+                    derive_seed(stream_seed, "ext_stream", kind_id),
+                )
+                if sampler is not None:
+                    clone._samplers[kind_id] = sampler
+        return clone
+
+    def _lookahead_value(self, clone: "SimulationEngine", spec: Lookahead) -> float:
+        """Значение критерия на конце короткого прогона."""
+        context = dict(clone.state.kpi_context())
+        context["kpi"] = clone._kpi_value
+        clone.economics.accrue_terminal(clone.state.time, clone._economic_basis_value)
+        report = clone.economics.report(clone.state.time)
+        context["npv"] = report.get("npv", 0.0)
+        context["net"] = report.get("net", 0.0)
+        try:
+            return float(self._expr(spec.objective).evaluate(context))
+        except (ExpressionError, TypeError, ValueError):
+            return 0.0
+
+    def _rollout(
+        self, spec: Lookahead, action_ref: str | None, policy: Policy
+    ) -> tuple[float, list[float]]:
+        """Прогнать кандидата вперёд ``spec.runs`` раз и свести результат."""
+        values: list[float] = []
+        for index in range(spec.runs):
+            stream_seed = (
+                None
+                if index == 0
+                else derive_seed(
+                    self.seed, "lookahead", policy.id,
+                    f"{round(self.state.time, 6)}", str(index),
+                )
+            )
+            clone = self._clone_for_lookahead(spec.horizon, stream_seed)
+            if action_ref:
+                clone._apply_control_action(
+                    action_ref, source=f"lookahead:{policy.id}", policy=policy
+                )
+                clone._check_continuation()
+                clone._try_start_waiting()
+            clone._loop()
+            values.append(self._lookahead_value(clone, spec))
+        return self._aggregate(values, spec), values
+
+    @staticmethod
+    def _aggregate(values: list[float], spec: Lookahead) -> float:
+        """Свести исходы просмотра одним числом согласно критерию."""
+        if not values:
+            return 0.0
+        ordered = sorted(values)
+        if spec.criterion == LookaheadCriterion.WORST:
+            return ordered[0] if spec.maximize else ordered[-1]
+        if spec.criterion == LookaheadCriterion.BEST:
+            return ordered[-1] if spec.maximize else ordered[0]
+        if spec.criterion == LookaheadCriterion.QUANTILE:
+            # осторожный выбор: для максимизации берём нижний квантиль
+            q = spec.quantile if spec.maximize else 1.0 - spec.quantile
+            position = q * (len(ordered) - 1)
+            low = int(position)
+            high = min(low + 1, len(ordered) - 1)
+            frac = position - low
+            return ordered[low] * (1 - frac) + ordered[high] * frac
+        return sum(values) / len(values)
+
+    def _evaluate_policy_with_lookahead(
+        self, policy: Policy, dp, trig: DecisionTrigger, context: dict[str, Any]
+    ) -> int:
+        """Выбрать действие просмотром вперёд: сравнить кандидатов на коротком горизонте."""
+        spec = policy.lookahead
+        assert spec is not None
+        candidates = list(spec.candidates) or [
+            rule.action_ref for rule in policy.effective_rules() if rule.action_ref
+        ]
+        # дубликаты не нужны: порядок сохраняем для детерминизма
+        seen: set[str] = set()
+        ordered = [c for c in candidates if not (c in seen or seen.add(c))]
+        scores: list[dict[str, Any]] = []
+        noop_score: float | None = None
+        if spec.include_noop:
+            noop_score, samples = self._rollout(spec, None, policy)
+            scores.append({"action": None, "score": round(noop_score, 6),
+                           "samples": [round(v, 6) for v in samples]})
+        best_action: str | None = None
+        best_score: float | None = None
+        for action_ref in ordered:
+            score, samples = self._rollout(spec, action_ref, policy)
+            scores.append({"action": action_ref, "score": round(score, 6),
+                           "samples": [round(v, 6) for v in samples]})
+            better = (
+                best_score is None
+                or (score > best_score if spec.maximize else score < best_score)
+            )
+            if better:
+                best_score, best_action = score, action_ref
+        entry = {
+            "t": round(self.state.time, 6),
+            "policy": policy.id,
+            "loop": policy.loop.value,
+            "decision_point": dp.id,
+            "trigger": trig.kind,
+            "condition": f"lookahead:{spec.objective}",
+            "criterion": spec.criterion.value,
+            "horizon": spec.horizon,
+            "runs": spec.runs,
+            "scores": scores,
+            "fired": False,
+            "action": best_action,
+        }
+        gain = None
+        if best_score is not None and noop_score is not None:
+            gain = (best_score - noop_score) if spec.maximize else (noop_score - best_score)
+            entry["gain_vs_noop"] = round(gain, 6)
+        applied = 0
+        worth_it = best_action is not None and (
+            gain is None or gain > spec.min_gain + _EPS
+        )
+        if worth_it:
+            outcome = self._apply_control_action(
+                best_action, source=f"lookahead:{policy.id}", policy=policy
+            )
+            entry["outcome"] = outcome
+            entry["fired"] = True
+            if outcome in ("applied", "scheduled"):
+                applied = 1
+                if policy.cooldown_hours:
+                    self._policy_cooldown[policy.id] = (
+                        self.state.time + policy.cooldown_hours
+                    )
+        self._policy_trace.append(entry)
+        self._lookahead_log.append(entry)
         return applied
 
     def _effect_with_magnitude(self, effect: EventEffect, magnitude: float | None) -> EventEffect:
@@ -1440,6 +1651,7 @@ class SimulationEngine:
         result.event_log_truncated = self._log_dropped
         result.decision_log = self._decision_log
         result.policy_trace = self._policy_trace
+        result.lookahead_log = self._lookahead_log
         result.observation_error = self.observations.error_report()
         result.rejected_actions = self._rejected_actions
         result.control_costs = self._control_cost_report()
