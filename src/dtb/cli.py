@@ -6,6 +6,8 @@ Commands:
     dtb simulate <scenario_id> [--runs N] [--seed S]
     dtb validate <enterprise_id>
     dtb export-template <path.xlsx>
+    dtb verify [--benchmarks mm1,mmc,...] [--replications N] [--seed S]
+    dtb verify-run <scenario_id> [--seed S]
 """
 
 from __future__ import annotations
@@ -37,7 +39,31 @@ def main(argv: list[str] | None = None) -> int:
     p_tpl = sub.add_parser("export-template", help="выгрузить пустой Excel-шаблон модели")
     p_tpl.add_argument("path")
 
+    p_ver = sub.add_parser("verify", help="сверить движок с аналитическими эталонами")
+    p_ver.add_argument(
+        "--benchmarks", default="", help="список через запятую: mm1,mmc,dd1,discounting,little"
+    )
+    p_ver.add_argument("--replications", type=int, default=3)
+    p_ver.add_argument("--seed", type=int, default=20260101)
+    p_ver.add_argument("--horizon", type=float, default=None)
+
+    p_vrun = sub.add_parser(
+        "verify-run", help="проверить инварианты на прогоне сценария"
+    )
+    p_vrun.add_argument("scenario_id")
+    p_vrun.add_argument("--seed", type=int, default=None)
+
     args = parser.parse_args(argv)
+
+    if args.command == "verify":
+        from dtb.verification import run_benchmarks
+
+        names = [n.strip() for n in args.benchmarks.split(",") if n.strip()] or None
+        report = run_benchmarks(
+            names, seed=args.seed, horizon=args.horizon, replications=args.replications
+        )
+        print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+        return 0 if report.passed else 3
 
     if args.command == "serve":
         import uvicorn
@@ -111,6 +137,23 @@ def main(argv: list[str] | None = None) -> int:
             "data_quality": data_quality_report(model),
         }, ensure_ascii=False, indent=2))
         return 0
+
+    if args.command == "verify-run":
+        from dtb.simulation import simulate
+        from dtb.verification import verify_run
+
+        scenario = db.load_scenario(args.scenario_id)
+        if scenario is None:
+            print(f"Сценарий {args.scenario_id!r} не найден", file=sys.stderr)
+            return 1
+        model = db.load_model(scenario.enterprise_id)
+        if model is None:
+            print("Предприятие не найдено", file=sys.stderr)
+            return 1
+        result = simulate(model, scenario, seed=args.seed)
+        report = verify_run(result, model)
+        print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+        return 0 if report.passed else 3
 
     if args.command == "export-template":
         from dtb.domain import Enterprise, EnterpriseModel

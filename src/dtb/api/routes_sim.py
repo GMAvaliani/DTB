@@ -28,6 +28,7 @@ from dtb.optimization import (
 )
 from dtb.simulation import SimulationResult, simulate
 from dtb.validation import validate_model, validate_scenario
+from dtb.verification import BENCHMARKS, run_benchmarks, verify_run
 
 router = APIRouter()
 
@@ -396,6 +397,39 @@ def simulation_policy_trace(
         "by_loop": by_loop,
         "truncated": len(trace) > limit,
     }
+
+
+@router.get("/verification/benchmarks", dependencies=[VIEW])
+def verification_benchmarks(
+    request: Request, names: str | None = None, seed: int = 20260101,
+    horizon: float | None = None, replications: int = 1,
+) -> dict[str, Any]:
+    """Аналитические эталоны: M/M/1, M/M/c, D/D/1, дисконтирование, закон Литтла.
+
+    Прогоны строятся на собственных эталонных моделях и не зависят от модели
+    предприятия: это проверка самого движка.
+    """
+    selected = [n.strip() for n in names.split(",") if n.strip()] if names else None
+    unknown = [n for n in (selected or []) if n not in BENCHMARKS]
+    if unknown:
+        raise HTTPException(
+            status_code=404, detail=f"unknown benchmarks: {', '.join(unknown)}"
+        )
+    return run_benchmarks(
+        selected, seed=seed, horizon=horizon, replications=max(1, min(10, replications))
+    ).to_dict()
+
+
+@router.get("/simulations/{sim_id}/verification", dependencies=[VIEW])
+def simulation_verification(request: Request, sim_id: str) -> dict[str, Any]:
+    """Отчёт верификации, приложенный к прогону: инварианты на его данных."""
+    context = ctx(request)
+    record = _record_or_404(context, sim_id)
+    result = _sample_result(record)
+    model = context.db.load_model(record["enterprise_id"])
+    if model is None:
+        raise HTTPException(status_code=404, detail="enterprise model not found")
+    return verify_run(result, model).to_dict()
 
 
 @router.get("/simulations/{sim_id}/economics", dependencies=[VIEW])

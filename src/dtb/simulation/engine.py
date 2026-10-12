@@ -1342,6 +1342,15 @@ class SimulationEngine:
                     1 for i in self.state.executing.values() if i.sed_id == sed_id
                 ),
                 "blocked_hours": blocked.get(sed_id, {}),
+                "executing_hours": round(self.state.executing_hours.get(sed_id, 0.0), 4),
+                "mean_waiting": round(
+                    waiting_totals.get(sed_id, 0.0)
+                    / max(1, self.state.completed_count.get(sed_id, 0)), 6
+                ),
+                "mean_service": round(
+                    self.state.executing_hours.get(sed_id, 0.0)
+                    / max(1, self.state.completed_count.get(sed_id, 0)), 6
+                ),
             }
         for res_id, res in self.state.resources.items():
             result.resource_stats[res_id] = {
@@ -1381,6 +1390,15 @@ class SimulationEngine:
             ),
             "rejected_actions": len(self._rejected_actions),
             "control_cost_total": result.control_costs.get("total", 0.0),
+            "measured_hours": round(max(0.0, self.state.time - self.state.stat_start_time), 6),
+            "avg_wip": round(
+                self.state.wip_integral
+                / max(_EPS, self.state.time - self.state.stat_start_time), 6
+            ),
+            "avg_queue": round(
+                self.state.queue_integral
+                / max(_EPS, self.state.time - self.state.stat_start_time), 6
+            ),
             "npv": result.economics.get("npv", 0.0),
             "warmup_hours": self._warmup_hours,
         }

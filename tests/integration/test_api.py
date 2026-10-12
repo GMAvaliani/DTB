@@ -312,3 +312,32 @@ def test_warmup_scenario_measures_steady_state(client):
     assert steady["warmup"]["hours"] == 168.0
     assert steady["economics"]["measured_from"] == 168.0
     assert steady["economics"]["warmup_excluded"]["income"] > 0
+
+
+def test_verification_endpoints(client):
+    """Фаза 4: отчёт верификации прогона и аналитические эталоны в API."""
+    client.post("/api/demo")
+    sim_id = client.post("/api/simulations", json={
+        "scenario_id": "demo_baseline", "kind": "single", "seed": 20250819,
+    }).json()["id"]
+    assert wait_done(client, sim_id) == "completed"
+
+    report = client.get(f"/api/simulations/{sim_id}/verification").json()
+    assert report["passed"] is True, [c for c in report["checks"] if not c["passed"]]
+    assert report["total"] > 10 and report["failed"] == 0
+    ids = {c["id"] for c in report["checks"]}
+    assert any(i.startswith("utility_balance:") for i in ids)
+    assert "economics_articles_sum" in ids
+    assert report["context"]["content_digest"]
+
+    # быстрые детерминированные эталоны: точное совпадение с теорией
+    bench = client.get(
+        "/api/verification/benchmarks?names=dd1,discounting&replications=1"
+    ).json()
+    assert bench["passed"] is True
+    assert {c["id"] for c in bench["checks"]} == {
+        "dd1_throughput", "dd1_utilization", "dd1_no_queue",
+        "discounting_integral", "discounting_nominal",
+    }
+    assert bench["context"]["replications"] == 1
+    assert client.get("/api/verification/benchmarks?names=nope").status_code == 404

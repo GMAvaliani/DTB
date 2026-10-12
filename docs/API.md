@@ -94,6 +94,9 @@ GET  /simulations/{id}/observation-error    |Y − Ŷ| по компонента
 GET  /simulations/{id}/rejected-actions     отклонённые и неудавшиеся действия
                                             + стоимость управления по контурам
 GET  /simulations/{id}/economics            NPV, статьи, разогрев
+GET  /simulations/{id}/verification         отчёт верификации прогона:
+                                            баланс полезностей, закон Литтла,
+                                            учёт ресурсов, сходимость экономики
 GET  /simulations/{id}/stream      SSE-прогресс (text/event-stream)
 GET  /simulations/compare?ids=a,b  сравнение (первый — baseline): разности
                                    средних, парные разности по сопряжённым
@@ -115,6 +118,17 @@ POST /optimizations                {scenario_id, variables[], objective_kpi_id
                                     optimizer} → 202
 GET  /optimizations/{id}
 ```
+
+## Верификация
+
+```
+GET /verification/benchmarks[?names=mm1,mmc,dd1,discounting,little
+                             &seed=&horizon=&replications=]
+```
+
+Сверка движка с аналитическими эталонами: M/M/1, M/M/c (Эрланг C), D/D/1,
+непрерывное дисконтирование, закон Литтла. Эталонные модели собираются
+модулем верификации, модель предприятия не нужна.
 
 ## Прочее
 

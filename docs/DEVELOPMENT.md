@@ -23,15 +23,16 @@ src/dtb/
   analysis/     Монте-Карло, прогноз, bottlenecks, сравнение
   optimization/ objective/variables/optimizers (см. OPTIMIZATION.md)
   validation/   валидация модели + data quality
+  verification/ сверка расчёта с аналитическими эталонами (см. VERIFICATION.md)
   integration/  импорт/коннекторы (см. ERP_INTEGRATION.md)
   persistence/  SQLAlchemy, версии, аудит, серии
   services/     фоновые job'ы (точка выделения воркеров)
   api/          FastAPI: маршруты, безопасность
   ai/           ассистент (см. AI_ARCHITECTURE.md)
   demo/         демо-модель «Демо-Завод»
-  cli.py        команды serve/demo/simulate/validate/export-template
+  cli.py        команды serve/demo/simulate/validate/export-template/verify
 frontend/       SPA (vanilla JS, SVG)
-tests/          unit / integration / e2e
+tests/          unit / integration / e2e / verification
 docs/           документация + ADR
 ```
 
@@ -42,10 +43,11 @@ docs/           документация + ADR
 ## Тесты
 
 ```bash
-python -m pytest                  # всё (~6 с)
-python -m pytest tests/unit       # движок, домен, граф, анализ, оптимизация
+python -m pytest                  # быстрые тесты (~12 с); контур верификации исключён
+python -m pytest tests/unit       # движок, домен, граф, анализ, оптимизация, экономика
 python -m pytest tests/integration  # БД, импорт/экспорт, API, auth
 python -m pytest tests/e2e        # полная приёмочная цепочка (Section 44)
+python -m pytest -m verification  # сверка с аналитическими эталонами (~60 с)
 ```
 
 Обязательные инварианты, закреплённые тестами:

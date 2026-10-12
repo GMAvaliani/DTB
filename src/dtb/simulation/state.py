@@ -151,6 +151,11 @@ class SimulationState:
         # bottleneck accounting: waiting hours per (sed_id, cause)
         self.blocked_hours: dict[tuple[str, str], float] = {}
         self.queue_peak: dict[str, int] = {}
+        # интегралы для проверок теории очередей (закон Литтла и т.п.)
+        self.stat_start_time = 0.0
+        self.wip_integral = 0.0  # ∫ (ожидают + выполняются) dt
+        self.queue_integral = 0.0  # ∫ ожидают dt
+        self.executing_hours: dict[str, float] = {}  # ∫ выполняются dt по СЭД
         self._seq = 0
 
     def next_seq(self) -> int:
@@ -197,6 +202,12 @@ class SimulationState:
             queue_by_sed[inst.sed_id] = queue_by_sed.get(inst.sed_id, 0) + 1
         for sed_id, n in queue_by_sed.items():
             self.queue_peak[sed_id] = max(self.queue_peak.get(sed_id, 0), n)
+        for inst in self.executing.values():
+            self.executing_hours[inst.sed_id] = (
+                self.executing_hours.get(inst.sed_id, 0.0) + dt
+            )
+        self.queue_integral += len(self.waiting) * dt
+        self.wip_integral += (len(self.waiting) + len(self.executing)) * dt
 
     def reset_statistics(self) -> None:
         """Удалить переходный режим: счётчики и интегралы — с нуля.
@@ -214,6 +225,10 @@ class SimulationState:
         self.event_counts.clear()
         self.blocked_hours.clear()
         self.queue_peak.clear()
+        self.stat_start_time = self.time
+        self.wip_integral = 0.0
+        self.queue_integral = 0.0
+        self.executing_hours.clear()
         for res in self.resources.values():
             res.busy_integral = 0.0
             res.capacity_integral = 0.0

@@ -680,6 +680,28 @@ async function vResults(main) {
                 })))
             : null));
       }
+      // верификация прогона: инварианты на его собственных данных
+      try {
+        const ver = await API.get(`/simulations/${simId}/verification`);
+        const failed = (ver.checks || []).filter(c => !c.passed);
+        content.append(card("Верификация прогона",
+          el("p", { class: "small muted" },
+            `Проверок: ${ver.total}, не прошло: ${ver.failed}. ` +
+            "Баланс полезностей, закон Литтла, учёт ресурсов, сходимость экономики."),
+          el("div", null,
+            ver.passed
+              ? el("span", { class: "badge ok" }, "все инварианты выполнены")
+              : el("span", { class: "badge err" }, `нарушено проверок: ${ver.failed}`)),
+          (failed.length ? failed : (ver.checks || []).slice(0, 8)).length
+            ? dataTable(["Проверка", "Ожидалось", "Получено", "Погрешность", "Итог"],
+                (failed.length ? failed : (ver.checks || []).slice(0, 8)).map(c => ({
+                  cells: [c.name, fmt(c.expected), fmt(c.observed),
+                    fmt(c.absolute_error),
+                    c.passed ? el("span", { class: "badge ok" }, "ок")
+                      : el("span", { class: "badge err" }, "нарушено")],
+                })))
+            : null));
+      } catch (e) { /* верификация необязательна для отображения результатов */ }
       // bottlenecks + event log
       content.append(el("div", { class: "row" },
         el("div", { class: "col" }, card("Узкие места (bottlenecks)",
