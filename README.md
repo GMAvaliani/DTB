@@ -70,6 +70,7 @@ docker build -t dtb . && docker run -p 8000:8000 dtb
 - [docs/KNOWLEDGE_GRAPH.md](docs/KNOWLEDGE_GRAPH.md) — граф знаний и causal-запросы
 - [docs/API.md](docs/API.md) — REST API (также: `/docs` на запущенном сервере)
 - [docs/ERP_INTEGRATION.md](docs/ERP_INTEGRATION.md) — коннекторы и импорт
+- **[docs/PROGRAM_DESCRIPTION.md](docs/PROGRAM_DESCRIPTION.md) — описание объединённого комплекса: устройство, листы книги, пример, эксперименты, отладка**
 - [docs/OPTIMIZATION.md](docs/OPTIMIZATION.md) — оптимизационный контур и просмотр вперёд
 - [docs/VERIFICATION.md](docs/VERIFICATION.md) — сверка расчёта с аналитическими эталонами
 - [docs/INTEROP.md](docs/INTEROP.md) — контракт стыковки движков
