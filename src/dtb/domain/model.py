@@ -15,6 +15,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from dtb.domain.base import EntityBase
 from dtb.domain.calendars import Calendar
+from dtb.domain.monitoring import MonitorRule
+from dtb.domain.projects import Project, WorkPackage
 from dtb.domain.economics import EconomicItem, EconomicsSettings
 from dtb.domain.control import (
     ControlActionDef,
@@ -80,6 +82,10 @@ ENTITY_COLLECTIONS: dict[str, type[EntityBase]] = {
     # режимы работы и экономика деятельности
     "calendar": Calendar,
     "economic_item": EconomicItem,
+    # проекты и освоенный объём, мониторинг показателей
+    "project": Project,
+    "work_package": WorkPackage,
+    "monitor_rule": MonitorRule,
     # заготовки ниши (NOT IMPLEMENTED, см. dtb.domain.links)
     "link": Link,
     "gap_type": GapType,
@@ -103,13 +109,16 @@ _COLLECTION_FIELD = {
     "observation": "observations",
     "calendar": "calendars",
     "economic_item": "economic_items",
+    "project": "projects",
+    "work_package": "work_packages",
+    "monitor_rule": "monitor_rules",
     "link": "links",
     "gap_type": "gap_types",
 }
 
 #: Версия схемы модели. Увеличивается при добавлении коллекций и полей,
 #: требующих миграции сохранённых снимков (см. migrate_snapshot).
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 class EnterpriseModel(BaseModel):
@@ -139,6 +148,10 @@ class EnterpriseModel(BaseModel):
     # экономика деятельности (ставки, разовые начисления, остаточная стоимость)
     economic_items: dict[str, EconomicItem] = Field(default_factory=dict)
     economics: EconomicsSettings = Field(default_factory=EconomicsSettings)
+    # проекты, пакеты работ (EVM) и правила мониторинга показателей
+    projects: dict[str, Project] = Field(default_factory=dict)
+    work_packages: dict[str, WorkPackage] = Field(default_factory=dict)
+    monitor_rules: dict[str, MonitorRule] = Field(default_factory=dict)
     # заготовки ниши: хранятся и версионируются, на расчёт не влияют
     links: dict[str, Link] = Field(default_factory=dict)
     gap_types: dict[str, GapType] = Field(default_factory=dict)
@@ -250,6 +263,13 @@ def migrate_snapshot(data: dict[str, Any]) -> dict[str, Any]:
         data.setdefault("feedbacks", [])
         data.setdefault("transfers", [])
         data["schema_version"] = 5
+    if version < 6:
+        # v5 → v6: проекты и пакеты работ (EVM), правила мониторинга
+        data = dict(data)
+        data.setdefault("projects", {})
+        data.setdefault("work_packages", {})
+        data.setdefault("monitor_rules", {})
+        data["schema_version"] = 6
     return data
 
 

@@ -64,7 +64,9 @@ POST /enterprises/{eid}/import/json
 POST /enterprises/{eid}/erp/sync-mock            агент-Актуализатор (mock ERP)
 GET  /enterprises/{eid}/export/excel|json|graph-json
 GET  /import/template                            пустая Excel-книга
-POST /demo                                       демо-предприятие + сценарии
+POST /demo[?which=plant|farm|all]                демо-предприятия + сценарии
+POST /enterprises/{eid}/import/estimate?project_id=&project_name=&sheet=
+                                                 смета со статусом → проект и пакеты работ
 ```
 
 ## Сценарии
@@ -137,6 +139,30 @@ GET /verification/benchmarks[?names=mm1,mmc,dd1,discounting,little
 Сверка движка с аналитическими эталонами: M/M/1, M/M/c (Эрланг C), D/D/1,
 непрерывное дисконтирование, закон Литтла. Эталонные модели собираются
 модулем верификации, модель предприятия не нужна.
+
+## Проекты (EVM), финансы, мониторинг — версия 0.2
+
+```
+GET  /enterprises/{eid}/projects                         проекты модели: пакеты, BAC, базовый план
+GET  /enterprises/{eid}/projects/{pid}/evm-status        EVM на дату статуса по фактам (без прогона)
+POST /enterprises/{eid}/projects/baseline[?project_id=]  базовый план детерминированным прогоном
+
+GET  /simulations/{id}/reports/evm                       PV/EV/AC, индексы, распределения по прогонам
+GET  /simulations/{id}/reports/evm/{pid}/packages        пакеты работ на конец прогона
+GET  /simulations/{id}/reports/cash-flow?period=&until=  ОДДС: hour|day|week|month|quarter|year|total|<часы>
+GET  /simulations/{id}/reports/income?period=&until=     ОПиУ по начислениям (капвложения отдельно)
+GET  /simulations/{id}/reports/cash-balance              остаток денег на конец каждых суток
+GET  /simulations/{id}/reports/cash-gap[?threshold=]     кассовые разрывы + вероятность по прогонам
+GET  /simulations/{id}/reports/payment-calendar?from_hours=&days=
+GET  /simulations/{id}/reports/variance?plan=<sim_id>    план-факт по статьям и периодам
+GET  /simulations/{id}/reports/dashboard?at=&window_days= онлайн-панель на любой момент
+GET  /simulations/{id}/alerts?period=&delay_days=        сигналы мониторинга и запаздывание отчётности
+GET  /reports/recommended                                какие отчёты выводить и как часто
+```
+
+Отчёты строятся из сохранённого результата: для Монте-Карло — по образцовому
+прогону, распределения сроков, стоимости и денег — по всем прогонам. Подробно
+— docs/EVM_AND_FINANCE.md.
 
 ## Стыковка движков
 

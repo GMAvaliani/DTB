@@ -163,6 +163,9 @@ class SimulationState:
         # bottleneck accounting: waiting hours per (sed_id, cause)
         self.blocked_hours: dict[tuple[str, str], float] = {}
         self.queue_peak: dict[str, int] = {}
+        #: функции, которые движок добавляет к языку выражений: деньги,
+        #: освоенный объём и т.п. (см. SimulationEngine._register_context)
+        self.extra_context: dict[str, Callable[..., float]] = {}
         # интегралы для проверок теории очередей (закон Литтла и т.п.)
         self.stat_start_time = 0.0
         self.wip_integral = 0.0  # ∫ (ожидают + выполняются) dt
@@ -275,6 +278,7 @@ class SimulationState:
                 sum(1 for i in self.executing.values() if i.sed_id == s)
             ),
             "t": lambda: self.time,
+            **self.extra_context,
         }
 
     def snapshot(self) -> dict[str, Any]:

@@ -171,6 +171,10 @@ class SEDDefinition(EntityBase):
     priority: int = 100  # lower number starts first when competing for inputs
     #: режим обработки прерывания (отказ ресурса, конец смены, условие)
     interruption_mode: InterruptionMode = InterruptionMode.RESUME
+    #: темп работы: множитель длительности (0,8 — на 20% быстрее). Меняется
+    #: управляющими действиями во время прогона (усиление бригады,
+    #: сверхурочные) и действует на экземпляры, начатые после изменения
+    duration_factor: float = Field(default=1.0, gt=0)
     external_model: ExternalModelRef | None = None
     tags: list[str] = Field(default_factory=list)
 

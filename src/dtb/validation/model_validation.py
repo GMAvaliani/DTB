@@ -111,6 +111,9 @@ def validate_model(model: EnterpriseModel) -> ValidationReport:
 
     # --- SEDs -------------------------------------------------------------------
     reachable = _reachable_seds(model)
+    # СЭД, выполняющие пакеты работ, запускаются сетевым графиком проекта и
+    # измеряются освоенным объёмом, а не выходными полезностями
+    work_seds = {wp.sed_ref for wp in model.work_packages.values() if wp.sed_ref}
     for sed in seds.values():
         if sed.parent_id and sed.parent_id not in seds:
             r.add(Severity.CRITICAL, "broken_ref", "sed", sed.id,
@@ -152,13 +155,17 @@ def validate_model(model: EnterpriseModel) -> ValidationReport:
         has_outputs = bool(sed.outputs) or any(
             b.outputs for b in sed.outcome_branches
         )
-        if not has_outputs:
+        if not has_outputs and sed.id not in work_seds:
             r.add(Severity.WARNING, "sed_no_outputs", "sed", sed.id,
                   "СЭД не формирует выходных полезностей")
-        if not sed.inputs and not sed.resources:
+        if not sed.inputs and not sed.resources and sed.id not in work_seds:
             r.add(Severity.INFO, "sed_no_inputs", "sed", sed.id,
                   "СЭД не потребляет входов и не использует ресурсов")
-        if not sed.triggers and sed.id in reachable["never_triggered"]:
+        if (
+            not sed.triggers
+            and sed.id in reachable["never_triggered"]
+            and sed.id not in work_seds
+        ):
             r.add(Severity.WARNING, "sed_unreachable", "sed", sed.id,
                   "СЭД не имеет триггеров и не создаётся событиями/ветвями — не будет выполняться")
         if (
@@ -224,8 +231,19 @@ def validate_model(model: EnterpriseModel) -> ValidationReport:
     # --- экономика --------------------------------------------------------------
     _validate_economics(r, model)
 
-    # goals without any implementing SED → недостижимая цель
+    # --- проекты, пакеты работ, мониторинг (версия 0.2) ---------------------------
+    _validate_projects(r, model)
+
+    # goals without any implementing SED → недостижимая цель. Цели по деньгам
+    # и проектам реализует не СЭД, а учёт денег и освоения: их KPI опираются
+    # на функции cash(), cpi() и т. п.
     implemented = {s.goal_id for s in seds.values() if s.goal_id}
+    for goal in goals.values():
+        if any(
+            tm.kpi_id in kpis and _uses_ledger_functions(kpis[tm.kpi_id].expression)
+            for tm in goal.target_metrics
+        ):
+            implemented.add(goal.id)
     for goal in goals.values():
         for sed_id in goal.sed_ids:
             implemented.add(None if sed_id not in seds else goal.id)
@@ -524,6 +542,101 @@ def _validate_economics(r: ValidationReport, model: EnterpriseModel) -> None:
               "ни одной статьи дохода: NPV будет заведомо отрицательным")
 
 
+_CASH_CATEGORIES = ("operating", "investing", "financing")
+#: Функции выражений, которые читают учёт денег и освоения (версия 0.2).
+LEDGER_FUNCTIONS = (
+    "cash", "net_cash_flow", "pv", "ev", "ac", "bac", "cpi", "spi", "spi_t",
+    "eac", "vac", "tcpi", "progress", "project_delay",
+)
+
+
+def _uses_ledger_functions(expression: str | None) -> bool:
+    import re
+
+    if not expression:
+        return False
+    return any(re.search(rf"\b{name}\s*\(", expression) for name in LEDGER_FUNCTIONS)
+
+
+def _validate_projects(r: ValidationReport, model: EnterpriseModel) -> None:
+    """Проекты и пакеты работ, правила мониторинга, разделы ОДДС."""
+    packages = model.work_packages
+    for wp in packages.values():
+        if wp.project_ref not in model.projects:
+            r.add(Severity.CRITICAL, "broken_ref", "work_package", wp.id,
+                  f"пакет ссылается на несуществующий проект {wp.project_ref!r}")
+        if wp.sed_ref and wp.sed_ref not in model.seds:
+            r.add(Severity.CRITICAL, "broken_ref", "work_package", wp.id,
+                  f"пакет выполняет несуществующий СЭД {wp.sed_ref!r}")
+        for pred in wp.predecessors:
+            if pred not in packages:
+                r.add(Severity.WARNING, "broken_ref", "work_package", wp.id,
+                      f"предшественник {pred!r} не существует и считается выполненным")
+        if wp.planned_quantity > 0 and wp.actual_quantity > wp.planned_quantity * 1.01:
+            r.add(Severity.WARNING, "volume_overrun", "work_package", wp.id,
+                  f"выполнено {wp.actual_quantity:g} {wp.unit} при плане "
+                  f"{wp.planned_quantity:g}: перерасход объёма")
+        if wp.sed_ref and not wp.level_of_effort and wp.work_hours is None:
+            r.add(Severity.INFO, "no_work_hours", "work_package", wp.id,
+                  "трудоёмкость не задана: длительность пакета берётся из СЭД целиком")
+    # циклы предшествования: такие пакеты никогда не будут запущены
+    state: dict[str, int] = {}
+
+    def visit(wid: str, path: list[str]) -> None:
+        state[wid] = 1
+        for pred in packages[wid].predecessors:
+            if pred not in packages:
+                continue
+            if state.get(pred) == 1:
+                cycle = path[path.index(pred):] + [pred] if pred in path else [wid, pred]
+                r.add(Severity.CRITICAL, "precedence_cycle", "work_package", wid,
+                      "цикл предшествования: " + " → ".join(cycle))
+            elif state.get(pred) is None:
+                visit(pred, path + [pred])
+        state[wid] = 2
+
+    for wid in sorted(packages):
+        if state.get(wid) is None:
+            visit(wid, [wid])
+    driven = {wp.sed_ref for wp in packages.values() if wp.sed_ref}
+    for sed_id in sorted(driven):
+        sed = model.seds.get(sed_id)
+        if sed is not None and sed.triggers:
+            r.add(Severity.WARNING, "work_sed_with_triggers", "sed", sed_id,
+                  "СЭД выполняет пакеты работ, но запускается и своими триггерами: "
+                  "такие экземпляры не относятся ни к одному пакету")
+    for pid, project in model.projects.items():
+        own = [wp for wp in packages.values() if wp.project_ref == pid]
+        if not own:
+            r.add(Severity.WARNING, "empty_project", "project", pid, "у проекта нет пакетов работ")
+            continue
+        if project.cash_category not in _CASH_CATEGORIES:
+            r.add(Severity.WARNING, "unknown_cash_category", "project", pid,
+                  f"раздел ОДДС {project.cash_category!r}: допустимо "
+                  + ", ".join(_CASH_CATEGORIES))
+        if project.advance_offset_share > 0 and not project.advance_payment:
+            r.add(Severity.INFO, "offset_without_advance", "project", pid,
+                  "задана доля зачёта аванса, но аванс не задан")
+        if any(wp.actual_quantity or wp.actual_cost() for wp in own) and project.status_date is None:
+            r.add(Severity.WARNING, "status_without_date", "project", pid,
+                  "есть фактические данные, но не задана дата статуса (status_date)")
+        without_plan = sum(
+            1 for wp in own
+            if wp.sed_ref and (wp.planned_start is None or wp.planned_finish is None)
+        )
+        if without_plan:
+            r.add(Severity.INFO, "no_baseline", "project", pid,
+                  f"{without_plan} пакетов без базового плана: PV по ним нулевой — "
+                  "постройте базовый план")
+    for item in model.economic_items.values():
+        if item.cash_category not in _CASH_CATEGORIES:
+            r.add(Severity.WARNING, "unknown_cash_category", "economic_item", item.id,
+                  f"раздел ОДДС {item.cash_category!r}: допустимо "
+                  + ", ".join(_CASH_CATEGORIES))
+    for rule in model.monitor_rules.values():
+        _check_expr(r, rule.condition, "monitor_rule", rule.id, "invalid_expression")
+
+
 def validate_scenario(model: EnterpriseModel, scenario: Scenario) -> ValidationReport:
     r = ValidationReport()
     for utype_id in scenario.initial_stock_overrides:
@@ -559,6 +672,12 @@ def validate_scenario(model: EnterpriseModel, scenario: Scenario) -> ValidationR
     if scenario.warmup_hours is not None and scenario.warmup_hours >= horizon:
         r.add(Severity.CRITICAL, "warmup_too_long", "scenario", scenario.id,
               f"разогрев {scenario.warmup_hours} ч не меньше горизонта {horizon} ч")
+    if scenario.project_mode == "status" and not any(
+        p.status_date is not None for p in model.projects.values()
+    ):
+        r.add(Severity.WARNING, "status_mode_without_status", "scenario", scenario.id,
+              "режим статуса, но ни у одного проекта нет даты статуса: "
+              "прогон пойдёт с начала проекта")
     if scenario.objective and scenario.objective.kpi_id not in model.kpis:
         r.add(Severity.CRITICAL, "broken_ref", "scenario", scenario.id,
               f"целевая функция ссылается на несуществующий KPI {scenario.objective.kpi_id!r}")

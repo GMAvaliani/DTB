@@ -492,21 +492,27 @@ def import_template(request: Request) -> Response:
 
 
 @router.post("/demo", dependencies=[EDIT], status_code=201)
-def create_demo_enterprise(request: Request) -> dict[str, Any]:
-    from dtb.demo import create_demo
+def create_demo_enterprise(request: Request, which: str = "plant") -> dict[str, Any]:
+    """Создать демо: ``plant`` (по умолчанию), ``farm`` (стройка) или ``all``."""
+    from dtb.demo import create_demos
 
     context = ctx(request)
-    model, scenarios = create_demo()
-    context.db.save_model(model)
-    context.db.save_version(model, author=actor_of(request), comment="demo model v1")
-    for scenario in scenarios:
-        context.db.save_scenario(scenario)
-    context.db.audit(actor_of(request), "demo_created", model.enterprise.id,
-                     "enterprise", model.enterprise.id)
-    return {
-        "enterprise_id": model.enterprise.id,
-        "scenarios": [s.id for s in scenarios],
-    }
+    try:
+        demos = create_demos(which)
+    except KeyError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    created = []
+    for model, scenarios in demos:
+        context.db.save_model(model)
+        context.db.save_version(model, author=actor_of(request), comment="demo model v1")
+        for scenario in scenarios:
+            context.db.save_scenario(scenario)
+        context.db.audit(actor_of(request), "demo_created", model.enterprise.id,
+                         "enterprise", model.enterprise.id)
+        created.append(
+            {"enterprise_id": model.enterprise.id, "scenarios": [s.id for s in scenarios]}
+        )
+    return {**created[0], "enterprises": created}
 
 
 # ------------------------------------------------------------------------ audit --

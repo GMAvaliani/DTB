@@ -103,6 +103,10 @@ class EconomicItem(EntityBase):
     ref: str | None = None  # ресурс / полезность / СЭД — по базе
     rate: float = 0.0  # ₽/ч для ставки, ₽ за единицу для событийных
     expression: str | None = None  # для basis=expression
+    #: строка отчёта о движении денежных средств
+    cash_category: str = "operating"  # operating | investing | financing
+    #: отсрочка оплаты: деньги движутся позже начисления (дебиторка, кредиторка)
+    payment_delay_hours: float = Field(default=0.0, ge=0)
     enabled: bool = True
 
     @model_validator(mode="after")
@@ -155,6 +159,10 @@ class EconomicsSettings(BaseModel):
     #: учитывать ли стоимость управляющих действий в экономике прогона
     include_control_costs: bool = True
     control_article: str = "управление"
+    #: остаток денежных средств на начало прогона
+    opening_cash: float = 0.0
+    #: шаг хранения отчётности, ч: 24 — посуточно, 1 — почасово
+    report_bucket_hours: float = Field(default=24.0, gt=0)
 
     def hourly_rate(self) -> float:
         """Непрерывная часовая ставка дисконтирования ρ."""

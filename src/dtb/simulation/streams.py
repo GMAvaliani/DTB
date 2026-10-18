@@ -64,15 +64,24 @@ class PoissonSampler(StreamSampler):
 
 
 class ScheduledSampler(StreamSampler):
-    def __init__(self, kind_id: str, spec: StreamSpec, horizon: float):
+    """Плановые события по расписанию.
+
+    Расписание задано во времени модели; ``origin`` — момент модели, с
+    которого начинается прогон (дата статуса проекта). События до него уже
+    произошли и в прогон не попадают, остальные сдвигаются на ``origin``.
+    """
+
+    def __init__(self, kind_id: str, spec: StreamSpec, horizon: float, origin: float = 0.0):
         super().__init__(kind_id)
-        times = sorted(t for t in spec.times if 0 <= t <= horizon)
+        end = horizon + origin
+        times = sorted(t for t in spec.times if origin - 1e-9 <= t <= end)
         if spec.interval:
             t = spec.start
-            while t <= horizon:
-                times.append(t)
+            while t <= end:
+                if t >= origin - 1e-9:
+                    times.append(t)
                 t += spec.interval
-        self.times = sorted(set(round(t, 9) for t in times))
+        self.times = sorted(set(round(max(0.0, t - origin), 9) for t in times))
         self.index = 0
 
     def _sample_after(self, last: float, now: float) -> tuple[float, dict[str, Any]] | None:
@@ -149,11 +158,12 @@ def build_sampler(
     rng: random.Random,
     registry: AdapterRegistry,
     seed: int,
+    origin: float = 0.0,
 ) -> StreamSampler | None:
     if spec.kind == StreamKind.POISSON:
         return PoissonSampler(kind_id, spec.rate_per_hour or 0.0, rng)
     if spec.kind == StreamKind.SCHEDULED:
-        return ScheduledSampler(kind_id, spec, horizon)
+        return ScheduledSampler(kind_id, spec, horizon, origin)
     if spec.kind == StreamKind.EXTERNAL:
         assert spec.external is not None
         return ExternalSampler(kind_id, spec.external, registry, seed)

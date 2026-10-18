@@ -63,6 +63,8 @@ from dtb.domain.seds import (
 from dtb.simulation.adapters import AdapterRegistry, ExternalModelError, default_registry
 from dtb.simulation.decisions import DecisionScheduler, DecisionTrigger, select_policies
 from dtb.simulation.economics import EconomicsLedger
+from dtb.simulation.monitoring import MonitorScheduler
+from dtb.simulation.projects import ProjectTracker
 from dtb.simulation.observations import ObservationLayer
 from dtb.simulation.result import Provenance, SimulationResult
 from dtb.simulation.state import SEDInstance, SimulationState
@@ -101,6 +103,8 @@ class SimulationConfig:
     max_log_entries: int = 5_000
     series_max_points: int = 2_000
     progress_every: int = 200
+    #: остановить прогон, как только завершены все проекты (базовый план)
+    stop_when_projects_done: bool = False
 
 
 class SimControl:
@@ -212,6 +216,8 @@ class SimulationEngine:
             overrides["warmup_hours"] = float(scenario.warmup_hours)
         if scenario.discount_rate_annual is not None:
             overrides["discount_rate_annual"] = float(scenario.discount_rate_annual)
+        if scenario.opening_cash is not None:
+            overrides["opening_cash"] = float(scenario.opening_cash)
         if overrides:
             econ_settings = econ_settings.model_copy(update=overrides)
         self.economics = EconomicsLedger(
@@ -222,8 +228,32 @@ class SimulationEngine:
             "hours": self._warmup_hours,
             "applied": False,
         }
+        # --- проекты (EVM) и мониторинг показателей (версия 0.2) ---
+        self.projects = ProjectTracker(
+            self.model.projects, self.model.work_packages,
+            {sid: expected_duration(sed) for sid, sed in self.base_model.seds.items()},
+            mode=scenario.project_mode,
+        )
+        self._time_origin = max(
+            (p.offset for p in self.projects.projects.values()), default=0.0
+        )
+        self.monitors = MonitorScheduler(self.model.monitor_rules, self.horizon)
         # --- режимы работы: календари, дисциплины очередей (фаза 5) ---
+        # графики работы заданы во времени проекта (t = 0 — начало проекта); в
+        # режиме статуса прогон начинается с даты статуса, поэтому календарь
+        # читается со сдвигом: выходные и праздники остаются на своих датах
+        self._calendar_shift = self._time_origin
         self._weekday_offset = int(self.model.enterprise.calendar_start_weekday)
+        self._start_date = None
+        if self.model.enterprise.start_date:
+            from datetime import date as _date, timedelta as _timedelta
+
+            try:
+                origin = _date.fromisoformat(self.model.enterprise.start_date)
+                self._start_date = origin + _timedelta(hours=self._time_origin)
+                self._weekday_offset = origin.weekday()
+            except ValueError:
+                self._start_date = None
         self._default_discipline = QueueDiscipline(
             self.model.enterprise.default_queue_discipline
         )
@@ -236,6 +266,7 @@ class SimulationEngine:
             if calendar is not None and calendar.enabled:
                 self._resource_calendar[res.id] = calendar
         self._priority_wait: set[str] = set()  # экземпляры, ждущие возврата ресурса
+        self._calendar_next: dict[str, float | None] = {}
         #: признак прогона-просмотра: внутри него просмотр вперёд отключён,
         #: чтобы рекурсия не разрасталась
         self._in_lookahead = False
@@ -294,7 +325,9 @@ class SimulationEngine:
             state = ResourceState(res.id, res.capacity)
             calendar = self._resource_calendar.get(res.id)
             if calendar is not None:
-                state.calendar_factor = calendar.factor_at(0.0, self._weekday_offset)
+                state.calendar_factor = calendar.factor_at(
+                    self._calendar_shift, self._weekday_offset
+                )
             self.state.resources[res.id] = state
         for kind_id, kind in sorted(self.model.event_kinds.items()):
             sampler = build_sampler(
@@ -304,6 +337,7 @@ class SimulationEngine:
                 substream(self.seed, "stream", kind_id),
                 self.registry,
                 derive_seed(self.seed, "ext_stream", kind_id),
+                origin=self._time_origin,
             )
             if sampler is not None:
                 self._samplers[kind_id] = sampler
@@ -316,6 +350,12 @@ class SimulationEngine:
         # начальное состояние известно точно: снимаем нулевое наблюдение сразу
         if self.observations.active:
             self.observations.take_samples(0.0, self._observation_true_value)
+        self._register_context()
+        if self.projects.active:
+            self.projects.initialize(0.0)
+            self.projects.start_finance(0.0)
+            self._release_ready_work_packages()
+            self.projects.bill(0.0, self._project_cash, self._project_accrual)
 
     # ------------------------------------------------------------- expressions --
 
@@ -400,6 +440,9 @@ class SimulationEngine:
             self._log_entry("sed_created", sed_id, instance=inst.instance_id, source=source)
 
     def _sample_duration(self, sed: SEDDefinition) -> float:
+        return self._sample_raw_duration(sed) * sed.duration_factor
+
+    def _sample_raw_duration(self, sed: SEDDefinition) -> float:
         d: DurationModel = sed.duration
         rng = self._duration_rng[sed.id]
         if d.kind == DurationKind.FIXED:
@@ -417,13 +460,102 @@ class SimulationEngine:
             return rng.expovariate(1.0 / mean) if mean > 0 else 0.0
         raise ValueError(f"unknown duration kind {d.kind}")  # pragma: no cover
 
+    # ------------------------------------- проекты, деньги, мониторинг (0.2) --
+
+    def _expected_duration_of(self, sed_id: str) -> float:
+        return self._expected_duration(self.model.seds.get(sed_id))
+
+    def _release_ready_work_packages(self) -> None:
+        """Создать экземпляры СЭД для пакетов работ, которым пора начаться."""
+        for wid in self.projects.pop_releases(self.state.time):
+            sed_id = self.projects.sed_of(wid)
+            if sed_id and sed_id in self.model.seds:
+                self._spawn(sed_id, {"work_package": wid}, f"work_package:{wid}")
+            else:
+                self._log_entry("warning", "work_package_without_sed", work_package=wid)
+
+    def _project_cash(self, pid: str, article: str, amount: float, t: float) -> None:
+        project = self.model.projects.get(pid)
+        category = project.cash_category if project else "investing"
+        self.economics.post_cash(article, amount, t, income=False, category=category)
+        self._log_entry("project_payment", pid, article=article, amount=round(amount, 2))
+
+    def _project_accrual(self, pid: str, wp, amount: float, t0: float, t1: float) -> None:
+        project = self.model.projects.get(pid)
+        name = project.name if project and project.name else pid
+        article = f"{name}: {wp.object_name}" if wp.object_name else name
+        self.economics.post_accrual(
+            f"project:{pid}", article, amount, t0, max(t0, t1),
+            capex=bool(project.capitalize) if project else True,
+        )
+
+    def _register_context(self) -> None:
+        """Финансовые и проектные функции в языке выражений модели.
+
+        Доступны в KPI, условиях политик, сторожевых точках и правилах
+        мониторинга: деньги и освоенный объём становятся частью состояния
+        двойника, а не итоговым отчётом за месяц.
+        """
+        economics = self.economics
+        projects = self.projects
+        state = self.state
+
+        def indicator(name: str):
+            def fn(pid: str) -> float:
+                if pid not in projects.projects:
+                    return 0.0
+                value = projects.indicators(pid, state.time).get(name)
+                return float(value) if value is not None else 0.0
+
+            return fn
+
+        def delay(pid: str) -> float:
+            if pid not in projects.projects:
+                return 0.0
+            ind = projects.indicators(pid, state.time)
+            return float((ind.get("at") or 0.0) - (ind.get("es") or 0.0))
+
+        self.state.extra_context = {
+            "cash": lambda: economics.cash_at(state.time),
+            "net_cash_flow": lambda days: economics.net_cash_between(
+                max(0.0, state.time - 24.0 * float(days)), state.time
+            ),
+            "pv": indicator("pv"),
+            "ev": indicator("ev"),
+            "ac": indicator("ac"),
+            "bac": indicator("bac"),
+            "cpi": indicator("cpi"),
+            "spi": indicator("spi"),
+            "spi_t": indicator("spi_t"),
+            "eac": indicator("eac"),
+            "vac": indicator("vac"),
+            "tcpi": indicator("tcpi"),
+            "progress": indicator("percent_complete"),
+            "project_delay": delay,
+        }
+
+    def _run_monitors(self) -> None:
+        context = self.state.kpi_context()
+        context["kpi"] = self._kpi_value
+
+        def evaluate(condition: str) -> bool:
+            return bool(self._expr(condition).evaluate(context))
+
+        for alert in self.monitors.check(self.state.time, evaluate):
+            self._log_entry(
+                "monitor_alert", alert["rule"], severity=alert["severity"],
+                message=alert["message"],
+            )
+
     def _apply_calendar(self, res_id: str) -> None:
         """Пересчитать доступную ёмкость ресурса по его графику работы."""
         calendar = self._resource_calendar.get(res_id)
         res = self.state.resources.get(res_id)
         if calendar is None or res is None:
             return
-        factor = calendar.factor_at(self.state.time, self._weekday_offset)
+        factor = calendar.factor_at(
+            self.state.time + self._calendar_shift, self._weekday_offset
+        )
         if abs(factor - res.calendar_factor) <= _EPS:
             return
         previous = res.calendar_factor
@@ -445,24 +577,7 @@ class SimulationEngine:
 
     def _expected_duration(self, sed: SEDDefinition | None) -> float:
         """Ожидаемая длительность СЭД — для дисциплины «сначала короткие»."""
-        if sed is None:
-            return 0.0
-        d = sed.duration
-        if d.kind == DurationKind.FIXED:
-            return float(d.value or 0.0)
-        if d.kind == DurationKind.UNIFORM:
-            return (float(d.low or 0.0) + float(d.high or 0.0)) / 2
-        if d.kind == DurationKind.TRIANGULAR:
-            return (
-                float(d.low or 0.0) + float(d.high or 0.0) + float(d.mode or 0.0)
-            ) / 3
-        if d.kind in (DurationKind.NORMAL, DurationKind.EXPONENTIAL):
-            return float(d.mean or 0.0)
-        if d.kind == DurationKind.LOGNORMAL:
-            import math as _math
-
-            return _math.exp(float(d.mean or 0.0) + float(d.std or 0.0) ** 2 / 2)
-        return 0.0
+        return expected_duration(sed)
 
     def _queue_sort_key(self, inst: SEDInstance) -> tuple:
         """Ключ сортировки очереди по действующей дисциплине.
@@ -485,7 +600,9 @@ class SimulationEngine:
             )
             return (held, remaining, inst.seq)
         priority = sed.priority if sed is not None else 10**9
-        return (held, priority, inst.seq)
+        work_package = inst.payload.get("work_package") if inst.payload else None
+        project_priority = self.projects.priority_of(work_package) if work_package else 0
+        return (held, priority, project_priority, inst.seq)
 
     def _try_start_waiting(self) -> None:
         t = self.state.time
@@ -550,6 +667,27 @@ class SimulationEngine:
         else:
             duration = self._sample_duration(sed)
             inst.sampled_duration = duration
+        work_package = inst.payload.get("work_package")
+        if work_package and work_package in self.projects.wps:
+            if not resumed:
+                # трудоёмкость пакета задана при номинальном темпе исполнителя:
+                # множитель — отношение к ожидаемой длительности СЭД исходной
+                # модели, поэтому ускорение сценарием или действием сохраняется
+                duration = self.projects.scale_duration(
+                    work_package, duration,
+                    self.projects.expected_durations.get(sed.id)
+                    or self._expected_duration(sed),
+                )
+                inst.sampled_duration = duration
+            project = self.model.projects.get(
+                self.projects.wps[work_package].wp.project_ref
+            )
+            self.projects.on_start(
+                work_package, t, duration, resumed,
+                project.material_price_factor if project else 1.0,
+                project.labor_rate_factor if project else 1.0,
+                pace=sed.duration_factor,
+            )
         inst.status = SEDStatus.EXECUTING
         inst.started_at = t if inst.started_at is None else inst.started_at
         inst.completion_time = t + duration
@@ -602,6 +740,10 @@ class SimulationEngine:
         sed = self.model.seds.get(inst.sed_id)
         del self.state.executing[inst.instance_id]
         inst.status = SEDStatus.COMPLETED
+        work_package = inst.payload.get("work_package")
+        if work_package and work_package in self.projects.wps:
+            self.projects.on_complete(work_package, self.state.time)
+            self._release_ready_work_packages()
         self.state.completed_count[inst.sed_id] = (
             self.state.completed_count.get(inst.sed_id, 0) + 1
         )
@@ -713,6 +855,11 @@ class SimulationEngine:
         self._release_resources(inst)
         del self.state.executing[inst.instance_id]
 
+        work_package = inst.payload.get("work_package")
+        if work_package and work_package in self.projects.wps:
+            if self.projects.on_stop(work_package, t, mode.value):
+                # пакет работ не исчезает: отказ — повторное выполнение с нуля
+                self._spawn(inst.sed_id, {"work_package": work_package}, "wp_retry")
         if mode == InterruptionMode.FAIL:
             inst.status = SEDStatus.FAILED
             inst.remaining_duration = None
@@ -963,6 +1110,8 @@ class SimulationEngine:
         clone.observations = copy.deepcopy(self.observations)
         clone.decisions = copy.deepcopy(self.decisions)
         clone.economics = copy.deepcopy(self.economics)
+        clone.projects = copy.deepcopy(self.projects)
+        clone.monitors = copy.deepcopy(self.monitors)
         clone._policy_cooldown = dict(self._policy_cooldown)
         clone._pending_event_decisions = list(self._pending_event_decisions)
         clone._pending_activations = copy.deepcopy(self._pending_activations)
@@ -988,6 +1137,7 @@ class SimulationEngine:
         clone.progress_cb = None
         clone.control = SimControl()
         clone._in_lookahead = True
+        clone._register_context()  # функции выражений — на состояние клона
         clone.horizon = min(self.horizon, self.state.time + horizon)
         if stream_seed is None:
             clone._samplers = copy.deepcopy(self._samplers)
@@ -998,6 +1148,7 @@ class SimulationEngine:
                     kind_id, kind.stream, clone.horizon,
                     substream(stream_seed, "stream", kind_id), self.registry,
                     derive_seed(stream_seed, "ext_stream", kind_id),
+                    origin=self._time_origin,
                 )
                 if sampler is not None:
                     clone._samplers[kind_id] = sampler
@@ -1454,7 +1605,17 @@ class SimulationEngine:
         if timer_t is not None:
             out.append((timer_t, 6, "decision_timer", ("decision_timer", None)))
         for res_id, calendar in sorted(self._resource_calendar.items()):
-            change = calendar.next_change(now, self.horizon, self._weekday_offset)
+            # следующая смена смены графика не меняется, пока её не достигли
+            cached = self._calendar_next.get(res_id, -1.0)
+            if cached is not None and cached <= now + _EPS:
+                shift = self._calendar_shift
+                cached = calendar.next_change(
+                    now + shift, self.horizon + shift, self._weekday_offset
+                )
+                if cached is not None:
+                    cached -= shift
+                self._calendar_next[res_id] = cached
+            change = cached
             if change is not None:
                 out.append((change, 0, f"cal:{res_id}", ("calendar", res_id)))
         if self._warmup_hours and not self._warmup_report["applied"]:
@@ -1463,6 +1624,17 @@ class SimulationEngine:
             out.append(
                 (pending.time, 7, f"{pending.seq:012d}", ("activation", pending.seq))
             )
+        if self.projects.active:
+            release_t = self.projects.next_release_time()
+            if release_t is not None:
+                out.append((release_t, 9, "wp_release", ("wp_release", None)))
+            billing_t = self.projects.next_billing_time()
+            if billing_t is not None:
+                out.append((max(billing_t, now), 10, "project_billing", ("project_billing", None)))
+        if self.monitors.active:
+            monitor_t = self.monitors.next_time()
+            if monitor_t is not None:
+                out.append((max(monitor_t, now), 11, "monitor", ("monitor", None)))
         for reversion in self._pending_reversions:
             out.append(
                 (reversion.time, 8, f"{reversion.seq:012d}", ("reversion", reversion.seq))
@@ -1514,7 +1686,13 @@ class SimulationEngine:
             if triggers or deferred:
                 self._check_continuation()
                 self._try_start_waiting()  # ТЗ: повторить попытку запуска
+            if self.monitors.active:
+                monitor_t = self.monitors.next_time()
+                if monitor_t is not None and monitor_t <= self.state.time + _EPS:
+                    self._run_monitors()
             self._record_series()
+            if self.config.stop_when_projects_done and self.projects.all_finished():
+                return "completed"
             moments_since_progress += 1
             if self.progress_cb and moments_since_progress >= self.config.progress_every:
                 moments_since_progress = 0
@@ -1605,6 +1783,12 @@ class SimulationEngine:
                     )
         elif kind == "calendar":
             self._apply_calendar(ref)
+        elif kind == "wp_release":
+            self._release_ready_work_packages()
+        elif kind == "project_billing":
+            self.projects.bill(self.state.time, self._project_cash, self._project_accrual)
+        elif kind == "monitor":
+            pass  # правила проверяются после обработки момента, в _loop
         elif kind == "warmup":
             if not self._warmup_report["applied"]:
                 self._apply_warmup()
@@ -1635,6 +1819,17 @@ class SimulationEngine:
                     "moments": self._n_moments,
                     "waiting": len(self.state.waiting),
                     "executing": len(self.state.executing),
+                    "cash": round(self.economics.cash_at(self.state.time), 2),
+                    "projects": {
+                        pid: {
+                            k: self.projects.indicators(pid, self.state.time).get(k)
+                            for k in ("cpi", "spi", "percent_complete", "ac", "ev")
+                        }
+                        for pid in self.projects.projects
+                    },
+                    "alerts": sum(
+                        1 for a in self.monitors.alerts if a["state"] == "raised"
+                    ),
                 }
             )
 
@@ -1655,8 +1850,18 @@ class SimulationEngine:
         result.observation_error = self.observations.error_report()
         result.rejected_actions = self._rejected_actions
         result.control_costs = self._control_cost_report()
+        if self.projects.active:
+            self.projects.close(self.state.time, self._project_cash, self._project_accrual)
+            result.projects = self.projects.report(self.state.time)
         self.economics.accrue_terminal(self.state.time, self._economic_basis_value)
         result.economics = self.economics.report(self.state.time)
+        result.finance = self.economics.finance_report(self.state.time)
+        result.finance["time_origin"] = self._time_origin
+        result.finance["start_date"] = (
+            self._start_date.isoformat() if self._start_date else None
+        )
+        if self.monitors.active:
+            result.monitoring = self.monitors.report(self.state.time)
         result.warmup = self._warmup_report
         result.final_stocks = {k: round(v, 6) for k, v in self.state.stocks.items()}
         context = self.state.kpi_context()
@@ -1868,6 +2073,26 @@ def _hash_dict(data: dict[str, float]) -> str:
     return hashlib.sha256(
         json.dumps(data, sort_keys=True).encode("utf-8")
     ).hexdigest()[:16]
+
+
+def expected_duration(sed: SEDDefinition | None) -> float:
+    """Математическое ожидание длительности СЭД по её закону распределения."""
+    if sed is None:
+        return 0.0
+    d = sed.duration
+    if d.kind == DurationKind.FIXED:
+        return float(d.value or 0.0)
+    if d.kind == DurationKind.UNIFORM:
+        return (float(d.low or 0.0) + float(d.high or 0.0)) / 2
+    if d.kind == DurationKind.TRIANGULAR:
+        return (float(d.low or 0.0) + float(d.high or 0.0) + float(d.mode or 0.0)) / 3
+    if d.kind in (DurationKind.NORMAL, DurationKind.EXPONENTIAL):
+        return float(d.mean or 0.0)
+    if d.kind == DurationKind.LOGNORMAL:
+        import math as _math
+
+        return _math.exp(float(d.mean or 0.0) + float(d.std or 0.0) ** 2 / 2)
+    return 0.0
 
 
 def simulate(

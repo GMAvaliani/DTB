@@ -90,6 +90,13 @@ class Scenario(EntityBase):
     #: Годовая ставка дисконтирования для этого прогона; пусто — из модели.
     discount_rate_annual: float | None = Field(default=None, ge=0)
 
+    #: Проекты: plan — с начала по базовому плану; status — продолжение от
+    #: даты статуса (выполненное считается сделанным, моделируется остаток).
+    project_mode: str = "plan"
+    #: Остаток денежных средств на старте прогона; пусто — из настроек
+    #: экономики. В режиме статуса — остаток на дату статуса.
+    opening_cash: float | None = None
+
     objective: ObjectiveSpec | None = None
     constraints: list[str] = Field(default_factory=list)
     version: int = Field(default=1, ge=1)
@@ -99,6 +106,8 @@ class Scenario(EntityBase):
     def _check(self) -> "Scenario":
         if self.observation_mode not in (None, "twin", "pure_simulation"):
             raise ValueError("observation_mode: допустимо twin | pure_simulation")
+        if self.project_mode not in ("plan", "status"):
+            raise ValueError("project_mode: допустимо plan | status")
         for kind_id, mult in self.event_rate_multipliers.items():
             if mult < 0:
                 raise ValueError(f"event rate multiplier for {kind_id} must be >= 0")

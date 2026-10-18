@@ -120,22 +120,50 @@ class Calendar(EntityBase):
         доля не меняется, и такой момент не нужен движку. Поэтому кандидаты
         проверяются по существу — сравнением доли до и после.
         """
-        candidates: set[float] = set()
-        for exc in self.exceptions:
-            candidates.update(
-                point for point in (exc.from_hour, exc.to_hour) if point > t + 1e-9
-            )
-        if self.shifts:
-            day = int(t // HOURS_PER_DAY)
-            # неделя вперёд: при недельном графике разрыв бывает длиной в выходные
-            for offset in range(0, DAYS_PER_WEEK + 1):
-                base = (day + offset) * HOURS_PER_DAY
-                for hour in self.boundaries_in_day():
-                    point = base + hour
-                    if point > t + 1e-9:
-                        candidates.add(point)
         current = self.factor_at(t, weekday_offset)
-        for point in sorted(c for c in candidates if c <= horizon + 1e-9):
-            if abs(self.factor_at(point, weekday_offset) - current) > 1e-9:
-                return point
+        exception_points = sorted(
+            {
+                point
+                for exc in self.exceptions
+                for point in (exc.from_hour, exc.to_hour)
+                if t + 1e-9 < point <= horizon + 1e-9
+            }
+        )
+        boundaries = self.boundaries_in_day() if self.shifts else []
+        # просмотр идёт по суткам до первого реального изменения. Исключение
+        # может быть длиннее недели (новогодние праздники): тогда граница смен
+        # после его окончания лежит дальше недели от t, и её нужно найти.
+        # Недельный график периодичен, поэтому восемь суток без изменений
+        # после последнего исключения означают, что изменений больше не будет.
+        day = int(t // HOURS_PER_DAY)
+        last_day = int(horizon // HOURS_PER_DAY) + 1
+        next_exception = 0
+        quiet_days = 0
+        while day <= last_day:
+            day_end = (day + 1) * HOURS_PER_DAY
+            points = [
+                day * HOURS_PER_DAY + hour
+                for hour in boundaries
+                if t + 1e-9 < day * HOURS_PER_DAY + hour <= horizon + 1e-9
+            ]
+            had_exception = False
+            while (
+                next_exception < len(exception_points)
+                and exception_points[next_exception] < day_end
+            ):
+                points.append(exception_points[next_exception])
+                next_exception += 1
+                had_exception = True
+            for point in sorted(points):
+                if abs(self.factor_at(point, weekday_offset) - current) > 1e-9:
+                    return point
+            quiet_days = 0 if had_exception else quiet_days + 1
+            if next_exception >= len(exception_points):
+                if not boundaries or quiet_days > DAYS_PER_WEEK:
+                    break
+            elif not boundaries:
+                # без смен доля меняется только на границах исключений
+                day = max(day + 1, int(exception_points[next_exception] // HOURS_PER_DAY))
+                continue
+            day += 1
         return None

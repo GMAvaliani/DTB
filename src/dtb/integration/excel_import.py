@@ -3,7 +3,9 @@ one sheet per view (goals, seds, utility_types, kpis, plans, actuals,
 org_units, employees, equipment, resources, event_kinds, erp_objects,
 erp_mappings, initial_state) plus the control-loop sheets (subjects,
 control_actions, policies, decision_points, observations), the work calendars
-(calendars) and the economics sheets (economic_items, economics)."""
+(calendars), the economics sheets (economic_items, economics), the
+enterprise settings sheet (enterprise) and the project/monitoring sheets
+(projects, work_packages, monitor_rules)."""
 
 from __future__ import annotations
 
@@ -52,6 +54,12 @@ _ALIASES = {
     "связи деятельности": "links",
     "разрывы": "gap_types",
     "типы разрывов": "gap_types",
+    "предприятие": "enterprise",
+    "проекты": "projects",
+    "пакеты работ": "work_packages",
+    "смета": "work_packages",
+    "мониторинг": "monitor_rules",
+    "правила мониторинга": "monitor_rules",
 }
 
 

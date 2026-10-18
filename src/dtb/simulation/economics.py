@@ -69,6 +69,11 @@ class ControlCostWindow:
     end: float | None = None
 
 
+def _control_category(loop: str) -> str:
+    """Раздел ОДДС для стоимости управления: развитие — инвестиции."""
+    return "investing" if loop == "development" else "operating"
+
+
 class EconomicsLedger:
     """Книга начислений прогона."""
 
@@ -106,6 +111,23 @@ class EconomicsLedger:
         self._control_one_time: list[dict[str, Any]] = []
         self._control_recurring: dict[str, float] = {}
         self._entries = 0
+        # --- отчётность по времени: начисления и деньги по шагам хранения ---
+        self.bucket_hours = float(settings.report_bucket_hours or 24.0)
+        #: (шаг, статья, доход?, капвложение?) → сумма начислений
+        self._accrual_buckets: dict[tuple[int, str, bool, bool], float] = {}
+        #: (шаг, статья, поступление?, раздел ОДДС) → сумма денег
+        self._cash_buckets: dict[tuple[int, str, bool, str], float] = {}
+        #: деньги, срок которых наступает после горизонта (отсрочки платежа):
+        #: (статья, поступление?, раздел ОДДС) → сумма
+        self._cash_after: dict[tuple[str, bool, str], float] = {}
+        #: денежные движения с точным временем: (t0, t1, сумма со знаком)
+        self._cash_events: list[tuple[float, float, float]] = []
+        # остаток считается часто (мониторинг, KPI), поэтому движения, целиком
+        # оставшиеся в прошлом, сворачиваются в одно число
+        self._open_cash: list[tuple[float, float, float]] = []
+        self._settled_cash = 0.0
+        self._settled_until = 0.0
+        self._npv_cash = 0.0
 
     # -------------------------------------------------------------- признаки --
 
@@ -131,6 +153,60 @@ class EconomicsLedger:
 
     # -------------------------------------------------------------- начисления --
 
+    def _split(
+        self, store: dict, key_rest: tuple, amount: float, t0: float, t1: float
+    ) -> None:
+        """Разнести сумму по шагам хранения пропорционально времени."""
+        step = self.bucket_hours
+        if t1 <= t0 + _EPS:
+            index = int(max(0.0, t0) // step)
+            store[(index, *key_rest)] = store.get((index, *key_rest), 0.0) + amount
+            return
+        span = t1 - t0
+        cursor = t0
+        while cursor < t1 - _EPS:
+            index = int(max(0.0, cursor) // step)
+            boundary = min(t1, (index + 1) * step)
+            if boundary <= cursor + _EPS:  # защита от зацикливания на границе
+                boundary = min(t1, cursor + step)
+            share = amount * (boundary - cursor) / span
+            store[(index, *key_rest)] = store.get((index, *key_rest), 0.0) + share
+            cursor = boundary
+
+    def _cash(
+        self,
+        article: str,
+        amount: float,
+        income: bool,
+        category: str,
+        t0: float,
+        t1: float | None = None,
+    ) -> None:
+        """Денежное движение: поступление либо выплата в момент или на интервале."""
+        if amount == 0.0:
+            return
+        end = t0 if t1 is None else t1
+        key = (article, income, category)
+        horizon = self.horizon
+        if t0 >= horizon - _EPS and not (end <= t0 + _EPS and t0 <= horizon + _EPS):
+            # целиком после горизонта
+            self._cash_after[key] = self._cash_after.get(key, 0.0) + amount
+        elif end > horizon + _EPS:
+            # часть интервала после горизонта: делится пропорционально времени
+            inside = amount * (horizon - t0) / (end - t0)
+            self._split(self._cash_buckets, key, inside, t0, horizon)
+            self._cash_after[key] = self._cash_after.get(key, 0.0) + (amount - inside)
+        else:
+            self._split(self._cash_buckets, key, amount, t0, end)
+        signed = amount if income else -amount
+        self._cash_events.append((t0, end, signed))
+        self._open_cash.append((t0, end, signed))
+        if end > t0 + _EPS:
+            factor = self._integral_factor(t0, end) / (end - t0)
+        else:
+            factor = self.discount_factor(t0)
+        self._npv_cash += signed * factor
+
     def _charge(
         self,
         item_id: str,
@@ -140,10 +216,27 @@ class EconomicsLedger:
         discounted: float,
         income: bool,
         t: float,
+        t_end: float | None = None,
+        capex: bool = False,
+        cash_category: str = "operating",
+        payment_delay: float = 0.0,
+        cash: bool = True,
     ) -> None:
         if amount == 0.0:
             return
         self._entries += 1
+        end = t if t_end is None else t_end
+        # отчётность по времени ведётся всегда, в том числе в разогреве:
+        # отчёт сам выбирает окно, а итог прогона разогрев исключает.
+        # Финансовая деятельность (кредиты, взносы собственников) — движение
+        # денег, а не доход или расход: в начисления она не попадает
+        if cash_category != "financing":
+            self._split(self._accrual_buckets, (article, income, capex), amount, t, end)
+        if cash:
+            self._cash(
+                article, amount, income, cash_category,
+                t + payment_delay, end + payment_delay,
+            )
         if t + _EPS < self.warmup:
             self._warmup_bucket.add(amount, discounted, income)
             return
@@ -167,7 +260,9 @@ class EconomicsLedger:
             discounted = abs(item.rate) * value * factor
             self._charge(
                 item.id, item.article, "rate", amount, discounted,
-                item.direction == EconomicDirection.INCOME, t0,
+                item.direction == EconomicDirection.INCOME, t0, t_end=t1,
+                cash_category=item.cash_category,
+                payment_delay=item.payment_delay_hours,
             )
         # повременная стоимость управляющих действий
         if self.settings.include_control_costs:
@@ -183,7 +278,9 @@ class EconomicsLedger:
                 )
                 self._charge(
                     f"control:{window.action_id}", self.settings.control_article,
-                    "rate", amount, discounted, False, start,
+                    "rate", amount, discounted, False, start, t_end=stop,
+                    cash_category=_control_category(window.loop),
+                    capex=window.loop == "development",
                 )
 
     def on_event(self, basis: EconomicBasis, ref: str, quantity: float, t: float) -> None:
@@ -196,6 +293,8 @@ class EconomicsLedger:
             self._charge(
                 item.id, item.article, "one_time", amount, amount * factor,
                 item.direction == EconomicDirection.INCOME, t,
+                cash_category=item.cash_category,
+                payment_delay=item.payment_delay_hours,
             )
 
     def on_control_action(self, action_id: str, loop: str, amount: float, t: float) -> None:
@@ -209,6 +308,8 @@ class EconomicsLedger:
             self._charge(
                 f"control:{action_id}", self.settings.control_article, "one_time",
                 amount, amount * self.discount_factor(t), False, t,
+                cash_category=_control_category(loop),
+                capex=loop == "development",
             )
 
     def open_control_window(
@@ -224,10 +325,115 @@ class EconomicsLedger:
             if value == 0.0:
                 continue
             amount = abs(item.rate) * value
+            # остаточная стоимость — оценка, а не движение денег
             self._charge(
                 item.id, item.article, "terminal", amount, amount * factor,
-                item.direction == EconomicDirection.INCOME, t,
+                item.direction == EconomicDirection.INCOME, t, cash=False,
             )
+
+    # ------------------------------------------------- проекты и деньги --
+
+    def post_accrual(
+        self,
+        item_id: str,
+        article: str,
+        amount: float,
+        t0: float,
+        t1: float,
+        income: bool = False,
+        capex: bool = False,
+        kind: str = "project",
+    ) -> None:
+        """Начисление без движения денег (оплата идёт отдельно, например актами)."""
+        if amount == 0.0:
+            return
+        if t1 > t0 + _EPS:
+            discounted = amount * self._integral_factor(t0, t1) / (t1 - t0)
+        else:
+            discounted = amount * self.discount_factor(t0)
+        self._charge(
+            item_id, article, kind, amount, discounted, income, t0,
+            t_end=t1, capex=capex, cash=False,
+        )
+
+    def post_cash(
+        self,
+        article: str,
+        amount: float,
+        t: float,
+        income: bool = False,
+        category: str = "operating",
+        t_end: float | None = None,
+    ) -> None:
+        """Движение денег без начисления: аванс, оплата акта, кредит."""
+        self._cash(article, amount, income, category, t, t_end)
+
+    def cash_at(self, t: float) -> float:
+        """Остаток денежных средств на момент t (точное время, не шаг хранения)."""
+        if t + _EPS < self._settled_until:
+            # запрос в прошлое: полный пересчёт по всем движениям
+            return float(self.settings.opening_cash) + self._partial_sum(
+                self._cash_events, t
+            )
+        still_open: list[tuple[float, float, float]] = []
+        for event in self._open_cash:
+            if event[1] <= t + _EPS and event[0] <= t + _EPS:
+                self._settled_cash += event[2]
+            else:
+                still_open.append(event)
+        self._open_cash = still_open
+        self._settled_until = t
+        return (
+            float(self.settings.opening_cash)
+            + self._settled_cash
+            + self._partial_sum(still_open, t)
+        )
+
+    @staticmethod
+    def _partial_sum(events: list[tuple[float, float, float]], t: float) -> float:
+        total = 0.0
+        for t0, t1, signed in events:
+            if t0 > t + _EPS:
+                continue
+            if t1 <= t + _EPS or t1 <= t0 + _EPS:
+                total += signed
+            else:
+                total += signed * (t - t0) / (t1 - t0)
+        return total
+
+    def net_cash_between(self, t0: float, t1: float) -> float:
+        """Чистый денежный поток за интервал [t0, t1]."""
+        return self.cash_at(t1) - self.cash_at(t0)
+
+    def finance_report(self, end_time: float) -> dict[str, Any]:
+        """Сырьё для отчётности: начисления и деньги по шагам хранения."""
+        return {
+            "bucket_hours": self.bucket_hours,
+            "opening_cash": float(self.settings.opening_cash),
+            "currency": self.settings.currency,
+            "end_time": round(end_time, 6),
+            "accrual": [
+                [index, article, income, capex, round(amount, 6)]
+                for (index, article, income, capex), amount in sorted(
+                    self._accrual_buckets.items()
+                )
+                if abs(amount) > 1e-9
+            ],
+            "cash": [
+                [index, article, income, category, round(amount, 6)]
+                for (index, article, income, category), amount in sorted(
+                    self._cash_buckets.items()
+                )
+                if abs(amount) > 1e-9
+            ],
+            "cash_after_horizon": [
+                [article, income, category, round(amount, 6)]
+                for (article, income, category), amount in sorted(self._cash_after.items())
+                if abs(amount) > 1e-9
+            ],
+            "closing_cash": round(self.cash_at(end_time), 6),
+            "npv_cash": round(self._npv_cash, 6),
+        }
 
     # ------------------------------------------------------------------ отчёт --
 

@@ -105,7 +105,15 @@ async function vDashboard(main) {
         await State.loadEnterprises();
         State.setEnterprise(r.enterprise_id);
       } catch (e) { showError(e); }
-    } }, "Создать демо-модель «Демо-Завод»")));
+    } }, "Создать демо-модель «Демо-Завод»"),
+    el("button", { onclick: async () => {
+      try {
+        const r = await API.post("/demo?which=farm");
+        toast(`Демо-модель создана: ${r.enterprise_id}`, "ok");
+        await State.loadEnterprises();
+        State.setEnterprise(r.enterprise_id);
+      } catch (e) { showError(e); }
+    } }, "Создать демо «Агроферма: строительство»")));
 }
 
 /* ------------------------------- enterprise ------------------------------- */
@@ -1287,10 +1295,287 @@ async function vAudit(main) {
   })))));
 }
 
+/* ------------------------------ projects / EVM ------------------------------ */
+
+const EVM_LABELS = {
+  bac: "BAC — бюджет", pv: "PV — план к дате", ev: "EV — освоено", ac: "AC — затраты",
+  spi: "SPI — индекс сроков", cpi: "CPI — индекс затрат", spi_t: "SPI(t) — по времени",
+  eac: "EAC — прогноз стоимости", vac: "VAC — отклонение от бюджета", tcpi: "TCPI — нужная эффективность",
+};
+
+function pct(v) { return v === null || v === undefined ? "—" : `${(v * 100).toFixed(1)}%`; }
+
+function indexBadge(v) {
+  if (v === null || v === undefined) return "—";
+  const cls = v >= 0.95 ? "ok" : v >= 0.85 ? "warn" : "err";
+  return el("span", { class: `badge ${cls}` }, v.toFixed(2));
+}
+
+async function vProjects(main) {
+  if (needEnterprise(main)) return;
+  main.append(el("h1", null, "Проекты и освоенный объём (EVM)"),
+    el("p", { class: "subtitle" }, "Смета как пакеты работ: план, факт на дату статуса, индексы SPI/CPI, прогноз EAC"));
+  const projects = await API.get(`/enterprises/${State.eid}/projects`);
+  const content = el("div");
+
+  const pidInp = el("input", { value: "project" });
+  const nameInp = el("input", { placeholder: "Название проекта" });
+  const fileInp = el("input", { type: "file", accept: ".xlsx" });
+  const importCard = card("Импорт сметы со статусом выполнения",
+    el("p", { class: "small muted" },
+      "Книга со столбцами «Наименование работ», «Объем», «Материал всего», «Работа всего» и блоком "
+      + "«Выполнение на ДД.ММ.ГГГГ». Объекты и разделы распознаются автоматически, расхождения "
+      + "арифметики показываются в отчёте."),
+    el("label", null, "Код проекта"), pidInp, el("label", null, "Название"), nameInp, fileInp,
+    el("div", { class: "btn-row" }, el("button", { class: "primary small", onclick: async () => {
+      if (!fileInp.files.length) return toast("Выберите файл", "err");
+      try {
+        const r = await API.upload(`/enterprises/${State.eid}/import/estimate?project_id=${encodeURIComponent(pidInp.value)}`
+          + `&project_name=${encodeURIComponent(nameInp.value)}`, fileInp.files[0]);
+        toast(`Импортировано пакетов: ${r.work_packages}`, r.report.ok ? "ok" : "err");
+        route();
+      } catch (e) { showError(e); }
+    } }, "Импортировать")));
+
+  if (!projects.length) {
+    main.append(card(null, el("p", { class: "muted" },
+      "В модели нет проектов. Импортируйте смету или создайте демо «Агроферма: строительство» на странице предприятий.")),
+      importCard);
+    return;
+  }
+  const sel = el("select", null, projects.map(p => el("option", { value: p.id },
+    `${p.name || p.id} · пакетов ${p.work_packages} · BAC ${fmt(p.bac, 0)}`)));
+  main.append(card(null, el("label", null, "Проект"), sel, el("div", { class: "btn-row" },
+    el("button", { class: "primary", onclick: load }, "Статус на дату"),
+    el("button", { onclick: async () => {
+      try {
+        const r = await API.post(`/enterprises/${State.eid}/projects/baseline`);
+        const lines = Object.values(r.projects || {}).map(p =>
+          `${p.project}: ${fmt(p.planned_duration_days)} дн, без сроков ${p.unscheduled.length}`);
+        toast("Базовый план построен: " + lines.join("; "), "ok");
+        load();
+      } catch (e) { showError(e); }
+    } }, "Построить базовый план"))), content, importCard);
+
+  async function load() {
+    content.innerHTML = "";
+    try {
+      const s = await API.get(`/enterprises/${State.eid}/projects/${sel.value}/evm-status`);
+      const i = s.indicators;
+      content.append(card(`${s.name} — ${s.status_label || "статус на " + fmtT(s.status_date)}`,
+        el("div", { class: "kpi-row" },
+          kpiTile("BAC", i.bac), kpiTile("PV", i.pv), kpiTile("EV", i.ev), kpiTile("AC", i.ac),
+          kpiTile("Готовность", pct(i.percent_complete)), kpiTile("Потрачено", pct(i.percent_spent))),
+        dataTable(["Показатель", "Значение"], [
+          { cells: [EVM_LABELS.spi, indexBadge(i.spi)] },
+          { cells: [EVM_LABELS.cpi, indexBadge(i.cpi)] },
+          { cells: ["CPI без материалов впрок", indexBadge(s.cpi_excluding_materials_ahead)] },
+          { cells: [EVM_LABELS.spi_t, indexBadge(i.spi_t)] },
+          { cells: ["Отставание по Earned Schedule", `${fmt((i.at - i.es) / 24)} дн`] },
+          { cells: [EVM_LABELS.eac + " (BAC/CPI)", fmt(i.eac, 0)] },
+          { cells: ["EAC с поправкой на материалы на объекте", fmt(s.eac_adjusted, 0)] },
+          { cells: ["EAC (разовые отклонения)", fmt(i.eac_atypical, 0)] },
+          { cells: [EVM_LABELS.tcpi, fmt(i.tcpi, 2)] },
+          { cells: ["Аванс: остаток к зачёту", fmt(s.advance.remaining, 0)] },
+        ]),
+        el("div", null, s.interpretation.map(t => el("p", { class: "small" }, "• " + t)))));
+      content.append(card("По объектам",
+        dataTable(["Объект", "Позиций", "BAC", "PV", "EV", "AC", "SPI", "CPI", "Готовность"],
+          Object.entries(s.by_object).map(([name, o]) => ({
+            cells: [name, o.positions, fmt(o.bac, 0), fmt(o.pv, 0), fmt(o.ev, 0), fmt(o.ac, 0),
+              indexBadge(o.spi), indexBadge(o.cpi), pct(o.percent_complete)],
+          })))));
+      if (s.materials_ahead_items.length) {
+        content.append(card(`Материалы, закупленные впрок: ${fmt(s.materials_ahead, 0)}`,
+          dataTable(["Позиция", "Объект", "Закуплено", "Смонтировано", "Впрок", "Готовность"],
+            s.materials_ahead_items.map(m => ({
+              cells: [m.name, m.object, fmt(m.purchased, 0), fmt(m.installed, 0), fmt(m.ahead, 0), pct(m.progress)],
+            })))));
+      }
+      if (s.overruns.length) {
+        content.append(card("Перерасходы",
+          dataTable(["Позиция", "Объект", "Вид", "План", "Факт", "Сверх бюджета"],
+            s.overruns.map(o => ({
+              cells: [o.name, o.object, o.kind === "volume" ? "объём" : "стоимость",
+                o.kind === "volume" ? `${fmt(o.planned_quantity)} ${o.unit}` : fmt(o.bac, 0),
+                o.kind === "volume" ? `${fmt(o.actual_quantity)} ${o.unit}` : fmt(o.ac, 0),
+                fmt(o.excess_cost, 0)],
+            })))));
+      }
+    } catch (e) { showError(e); }
+  }
+  load();
+}
+
+/* ---------------------------- finance online ---------------------------- */
+
+async function vFinance(main) {
+  if (needEnterprise(main)) return;
+  main.append(el("h1", null, "Финансы и мониторинг онлайн"),
+    el("p", { class: "subtitle" },
+      "Отчёт о движении денежных средств, прибыль, кассовые разрывы и сигналы — на любой день прогона, а не раз в месяц"));
+  const { sims, sel } = await simPicker(main, ["single", "monte_carlo"]);
+  if (!sims.length) { main.append(card(null, el("p", { class: "muted" }, "Симуляций ещё нет."))); return; }
+  const content = el("div");
+  main.append(card(null, el("label", null, "Симуляция"), sel,
+    el("div", { class: "btn-row" }, el("button", { class: "primary", onclick: load }, "Показать"))), content);
+
+  async function load() {
+    content.innerHTML = "";
+    const simId = sel.value;
+    let balance, gap, alerts, evm;
+    try {
+      [balance, gap, alerts, evm] = await Promise.all([
+        API.get(`/simulations/${simId}/reports/cash-balance`),
+        API.get(`/simulations/${simId}/reports/cash-gap`),
+        API.get(`/simulations/${simId}/alerts`),
+        API.get(`/simulations/${simId}/reports/evm`),
+      ]);
+    } catch (e) { showError(e); return; }
+    if (!balance.length) { content.append(card(null, el("p", { class: "muted" }, "В прогоне нет финансовых данных."))); return; }
+    const end = balance[balance.length - 1].t;
+
+    // онлайн-панель на выбранный день
+    const slider = el("input", { type: "range", min: 1, max: balance.length, value: balance.length, style: "width:100%" });
+    const dayLabel = el("span", { class: "small muted" });
+    const dashBox = el("div");
+    async function drawDash() {
+      const point = balance[Number(slider.value) - 1];
+      dayLabel.textContent = point.date ? `на конец ${point.date}` : `t = ${fmtT(point.t)}`;
+      const d = await API.get(`/simulations/${simId}/reports/dashboard?at=${point.t}`);
+      dashBox.innerHTML = "";
+      dashBox.append(el("div", { class: "kpi-row" },
+        kpiTile("Остаток денег", d.cash.balance, d.cash.balance < 0 ? "err" : ""),
+        kpiTile("Чистый поток в день (30 дн)", d.cash.net_per_day),
+        kpiTile("Запас, дней", d.cash.runway_days ?? "—"),
+        kpiTile("Выручка, мес. темп", d.profit_and_loss_window.revenue_run_rate_month),
+        kpiTile("Маржа (30 дн)", pct(d.profit_and_loss_window.margin)),
+        kpiTile("Капвложения (30 дн)", d.profit_and_loss_window.capital_expenditure)));
+      const projRows = Object.entries(d.projects).map(([pid, p]) => ({
+        cells: [p.name || pid, pct(p.percent_complete), indexBadge(p.spi), indexBadge(p.cpi), fmt(p.eac, 0)],
+      }));
+      if (projRows.length) dashBox.append(dataTable(["Проект", "Готовность", "SPI", "CPI", "EAC"], projRows));
+      dashBox.append(el("p", { class: "small" }, d.alerts_active.length
+        ? "Активные сигналы: " + d.alerts_active.map(a => `${a.name} (${a.severity})`).join("; ")
+        : "Активных сигналов нет"));
+    }
+    slider.addEventListener("change", drawDash);
+    content.append(card("Панель руководителя", dayLabel, slider, dashBox));
+    drawDash();
+
+    // остаток денег
+    const cashPoints = balance.map(p => [p.t, p.balance]);
+    content.append(card("Остаток денежных средств по дням",
+      chartLegend([["остаток", "#3ecf8e"], ["ноль", "#f25f5c"]]),
+      el("div", { class: "svg-wrap" }, lineChart({ width: 860, height: 240, series: [
+        { name: "остаток", color: "#3ecf8e", points: cashPoints },
+        { name: "ноль", color: "#f25f5c", points: [[0, 0], [end, 0]], dash: "4 4", width: 1 }] })),
+      el("p", { class: "small" }, gap.has_gap
+        ? `Кассовый разрыв: минимум ${fmt(gap.min_balance, 0)} (${gap.min_balance_date || fmtT(gap.min_balance_at)}), `
+          + `дней ниже нуля: ${fmt(gap.days_below)}, нужен резерв ${fmt(gap.required_reserve, 0)}`
+        : `Разрывов нет; минимальный остаток ${fmt(gap.min_balance, 0)} (${gap.min_balance_date || "—"})`),
+      gap.monte_carlo && gap.monte_carlo.runs > 1
+        ? el("p", { class: "small muted" }, `По ${gap.monte_carlo.runs} прогонам: вероятность разрыва `
+          + `${pct(gap.monte_carlo.probability_cash_gap)}, минимум остатка P10 ${fmt(gap.monte_carlo.min_cash.p10, 0)}, `
+          + `медиана ${fmt(gap.monte_carlo.min_cash.p50, 0)}`)
+        : null));
+
+    // ОДДС и ОПиУ
+    const periodSel = el("select", null, [["day", "сутки"], ["week", "неделя"], ["month", "месяц"],
+      ["quarter", "квартал"], ["total", "весь прогон"]].map(([v, t]) => el("option", { value: v }, t)));
+    periodSel.value = "month";
+    const untilInp = el("input", { type: "number", min: 1, placeholder: "срез: день прогона (пусто — конец)" });
+    const reportBox = el("div");
+    async function drawReports() {
+      reportBox.innerHTML = "";
+      const until = untilInp.value ? `&until=${Number(untilInp.value) * 24}` : "";
+      const [flow, income] = await Promise.all([
+        API.get(`/simulations/${simId}/reports/cash-flow?period=${periodSel.value}${until}`),
+        API.get(`/simulations/${simId}/reports/income?period=${periodSel.value}${until}`),
+      ]);
+      const names = { operating: "текущая", investing: "инвестиционная", financing: "финансовая" };
+      reportBox.append(el("h4", null, `ОДДС ${flow.until_date ? "по " + flow.until_date : ""}`),
+        dataTable(["Период", "На начало", "Текущая", "Инвестиционная", "Финансовая", "Чистый поток", "На конец"],
+          flow.rows.map(r => ({
+            cells: [r.period, fmt(r.opening_balance, 0),
+              ...["operating", "investing", "financing"].map(c => fmt((r.sections[c] || {}).net, 0)),
+              fmt(r.net_cash_flow, 0), fmt(r.closing_balance, 0)],
+          }))),
+        el("details", null, el("summary", null, "Статьи ОДДС за весь срез"),
+          dataTable(["Раздел", "Статья", "Поступления", "Платежи"],
+            flow.rows.flatMap(r => Object.entries(r.sections).flatMap(([c, sec]) => [
+              ...Object.entries(sec.inflow_by_article).map(([a, v]) => ({ cells: [`${r.period} · ${names[c] || c}`, a, fmt(v, 0), ""] })),
+              ...Object.entries(sec.outflow_by_article).map(([a, v]) => ({ cells: [`${r.period} · ${names[c] || c}`, a, "", fmt(v, 0)] })),
+            ])))),
+        flow.after_horizon.inflow || flow.after_horizon.outflow
+          ? el("p", { class: "small muted" }, `После конца прогона ожидается: поступлений ${fmt(flow.after_horizon.inflow, 0)}, `
+            + `платежей ${fmt(flow.after_horizon.outflow, 0)} (отсрочки платежа)`)
+          : null,
+        el("h4", null, "Отчёт о прибылях и убытках"),
+        dataTable(["Период", "Выручка", "Расходы", "Прибыль", "Маржа", "Капвложения (вне ОПиУ)"],
+          income.rows.map(r => ({
+            cells: [r.period, fmt(r.revenue, 0), fmt(r.expenses, 0), fmt(r.profit, 0), pct(r.margin),
+              fmt(r.capital_expenditure, 0)],
+          }))));
+    }
+    periodSel.addEventListener("change", drawReports);
+    untilInp.addEventListener("change", drawReports);
+    content.append(card("Отчётность за любой период",
+      el("div", { class: "row" }, el("div", { class: "col" }, el("label", null, "Период"), periodSel),
+        el("div", { class: "col" }, el("label", null, "Срез на день"), untilInp)), reportBox));
+    drawReports();
+
+    // освоенный объём
+    Object.entries(evm.projects || {}).forEach(([pid, p]) => {
+      const s = p.series || {};
+      const pts = key => (s.t || []).map((t, i) => [t, s[key][i]]);
+      const mc = (evm.monte_carlo || {})[pid];
+      const f = p.final || {};
+      content.append(card(`Освоенный объём: ${p.name || pid}${p.mode === "status" ? " (прогноз от статуса)" : ""}`,
+        chartLegend([["PV — план", "#8b98b8"], ["EV — освоено", "#4f8ff7"], ["AC — затраты", "#f5b83d"]]),
+        el("div", { class: "svg-wrap" }, lineChart({ width: 860, height: 260, series: [
+          { name: "PV", color: "#8b98b8", points: pts("pv"), dash: "5 4" },
+          { name: "EV", color: "#4f8ff7", points: pts("ev") },
+          { name: "AC", color: "#f5b83d", points: pts("ac") }] })),
+        el("div", { class: "kpi-row" },
+          kpiTile("Завершение", p.finished_at === null ? "не завершён" : fmtT(p.finished_at)),
+          kpiTile("Плановое завершение", fmtT(p.planned_finish)),
+          kpiTile("Итог AC", f.ac),
+          kpiTile("CPI", f.cpi === null || f.cpi === undefined ? null : f.cpi.toFixed(2)),
+          kpiTile("SPI(t)", f.spi_t === null || f.spi_t === undefined ? null : f.spi_t.toFixed(2))),
+        mc && mc.runs > 1 && mc.finish
+          ? el("p", { class: "small muted" }, `По ${mc.runs} прогонам: срок P50 ${fmtT(mc.finish.p50)}, P80 ${fmtT(mc.finish.p80)}; `
+            + `вероятность уложиться в срок ${pct(mc.probability_on_time)}, в бюджет ${pct(mc.probability_within_budget)}; `
+            + `стоимость P50 ${fmt(mc.final_cost.p50, 0)}, P80 ${fmt(mc.final_cost.p80, 0)}`)
+          : null));
+    });
+
+    // сигналы и запаздывание отчётности
+    const lag = alerts.reporting_lag || {};
+    content.append(card("Сигналы мониторинга",
+      el("p", { class: "small muted" }, lag.mean_lag_days !== null && lag.mean_lag_days !== undefined
+        ? `Ежемесячный отчёт (готов через ${lag.delay_days} дней после конца месяца) показал бы эти отклонения `
+          + `в среднем на ${fmt(lag.mean_lag_days)} дн позже, максимум — на ${fmt(lag.max_lag_days)} дн.`
+        : "Сигналов не было."),
+      dataTable(["Дата", "Правило", "Важность", "Состояние", "Сообщение"],
+        ((alerts.monitoring || {}).alerts || []).map(a => ({
+          cells: [fmtT(a.t), a.name, a.severity, a.state === "raised" ? "поднят" : "снят", a.message],
+        }))),
+      (lag.alerts || []).length
+        ? el("details", null, el("summary", null, "Когда то же показал бы месячный отчёт"),
+          dataTable(["Возник", "Правило", "Отчёт за", "Отчёт готов", "Опоздание, дн"],
+            lag.alerts.map(a => ({ cells: [a.raised_date || fmtT(a.raised_at), a.name, a.report_period,
+              a.report_available_date || fmtT(a.report_available_at), fmt(a.lag_days)] }))))
+        : null));
+  }
+  load();
+}
+
 const VIEWS = {
   dashboard: vDashboard, enterprise: vEnterprise, goals: vGoals, seds: vSeds,
   events: vEvents, org: vOrg, resources: vResources, erp: vErp,
   scenarios: vScenarios, simulate: vSimulate, results: vResults, forecast: vForecast,
   compare: vCompare, optimize: vOptimize, graph: vGraph, ai: vAi,
   import: vImport, versions: vVersions, audit: vAudit,
+  projects: vProjects, finance: vFinance,
 };

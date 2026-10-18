@@ -78,10 +78,13 @@ from dtb.domain.control import (
     Subject,
 )
 from dtb.domain.model import EnterpriseModel
+from dtb.domain.monitoring import AlertSeverity, MonitorRule
+from dtb.domain.projects import CostRecognition, Project, WorkPackage
 from dtb.integration.base import ImportReport
 
 # Sheet/file names in the workbook layout (8-view structure of the source spec).
 SHEETS = [
+    "enterprise",  # настройки предприятия: дата начала, день недели, горизонт
     "goals",  # view 1
     "seds",  # view 2
     "utility_types",  # view 2/6
@@ -104,6 +107,9 @@ SHEETS = [
     "calendars",  # режимы работы: смены, выходные, остановки
     "economic_items",  # экономика: статьи начисления
     "economics",  # экономика: настройки прогона (валюта, дисконт, разогрев)
+    "projects",  # проекты (EVM): условия оплаты, дата статуса, поправки цен
+    "work_packages",  # пакеты работ: смета, план, факт, исполнитель
+    "monitor_rules",  # мониторинг: правила регулярной проверки показателей
     "links",  # ЗАГОТОВКА: связь как объект (движком не используется)
     "gap_types",  # ЗАГОТОВКА: типология разрывов (движком не используется)
 ]
@@ -337,6 +343,7 @@ def _apply_sed(model: EnterpriseModel, row: dict[str, Any]) -> tuple[str, bool]:
         interruption_mode=_enum(
             row.get("interruption_mode"), InterruptionMode, InterruptionMode.RESUME
         ),
+        duration_factor=_f(row.get("duration_factor"), 1.0) or 1.0,
     )
     return sid, is_new
 
@@ -800,6 +807,8 @@ def _apply_economic_item(model: EnterpriseModel, row: dict[str, Any]) -> tuple[s
         rate=_f(row.get("rate"), 0.0) or 0.0,
         expression=_s(row.get("expression")) or None,
         enabled=_b(row.get("enabled")),
+        cash_category=_s(row.get("cash_category")) or "operating",
+        payment_delay_hours=_f(row.get("payment_delay_hours"), 0.0) or 0.0,
     )
     return iid, is_new
 
@@ -849,8 +858,111 @@ def _apply_economics(model: EnterpriseModel, row: dict[str, Any]) -> tuple[str, 
         warmup_hours=_f(row.get("warmup_hours"), 0.0) or 0.0,
         include_control_costs=_b(row.get("include_control_costs")),
         control_article=_s(row.get("control_article")) or "управление",
+        opening_cash=_f(row.get("opening_cash"), 0.0) or 0.0,
+        report_bucket_hours=_f(row.get("report_bucket_hours"), 24.0) or 24.0,
     )
     return "economics", True
+
+
+def _apply_enterprise(model: EnterpriseModel, row: dict[str, Any]) -> tuple[str, bool]:
+    """Лист настроек предприятия: одна строка; пустые ячейки не меняют модель."""
+    ent = model.enterprise
+    start = row.get("start_date")
+    if hasattr(start, "date"):  # Excel отдаёт дату как datetime
+        start = start.date().isoformat()
+    if _s(start):
+        ent.start_date = _s(start)[:10]
+    weekday = _i(row.get("calendar_start_weekday"))
+    if weekday is not None:
+        ent.calendar_start_weekday = weekday
+    horizon = _f(row.get("planning_horizon_hours"))
+    if horizon:
+        ent.planning_horizon_hours = horizon
+    if _s(row.get("time_zone")):
+        ent.time_zone = _s(row.get("time_zone"))
+    return ent.id, False
+
+
+def _opt_f(value: Any) -> float | None:
+    return _f(value) if _s(value) else None
+
+
+def _apply_project(model: EnterpriseModel, row: dict[str, Any]) -> tuple[str, bool]:
+    pid = _s(row.get("id"))
+    is_new = pid not in model.projects
+    model.projects[pid] = Project(
+        id=pid,
+        name=_s(row.get("name")),
+        description=_s(row.get("description")),
+        planned_start=_f(row.get("planned_start"), 0.0) or 0.0,
+        planned_finish=_opt_f(row.get("planned_finish")),
+        status_date=_opt_f(row.get("status_date")),
+        status_label=_s(row.get("status_label")),
+        contract_value=_opt_f(row.get("contract_value")),
+        advance_payment=_f(row.get("advance_payment"), 0.0) or 0.0,
+        advance_offset_share=_f(row.get("advance_offset_share"), 0.0) or 0.0,
+        advance_paid_at=_f(row.get("advance_paid_at"), 0.0) or 0.0,
+        billing_period_hours=_f(row.get("billing_period_hours"), 720.0) or 720.0,
+        cash_category=_s(row.get("cash_category")) or "investing",
+        capitalize=_b(row.get("capitalize")),
+        material_recognition=_enum(
+            row.get("material_recognition"), CostRecognition, CostRecognition.ON_PROGRESS
+        ),
+        material_price_factor=_f(row.get("material_price_factor"), 1.0) or 1.0,
+        labor_rate_factor=_f(row.get("labor_rate_factor"), 1.0) or 1.0,
+        start_not_before_planned=_b(row.get("start_not_before_planned"), False),
+        priority=_i(row.get("priority"), 0) or 0,
+        enabled=_b(row.get("enabled")),
+    )
+    return pid, is_new
+
+
+def _apply_work_package(model: EnterpriseModel, row: dict[str, Any]) -> tuple[str, bool]:
+    wid = _s(row.get("id"))
+    is_new = wid not in model.work_packages
+    model.work_packages[wid] = WorkPackage(
+        id=wid,
+        name=_s(row.get("name")),
+        project_ref=_s(row.get("project_ref")),
+        object_name=_s(row.get("object_name")),
+        section=_s(row.get("section")),
+        unit=_s(row.get("unit")),
+        planned_quantity=_f(row.get("planned_quantity"), 0.0) or 0.0,
+        material_unit_cost=_f(row.get("material_unit_cost"), 0.0) or 0.0,
+        labor_unit_cost=_f(row.get("labor_unit_cost"), 0.0) or 0.0,
+        material_total=_opt_f(row.get("material_total")),
+        labor_total=_opt_f(row.get("labor_total")),
+        delivery_cost=_f(row.get("delivery_cost"), 0.0) or 0.0,
+        equipment_cost=_f(row.get("equipment_cost"), 0.0) or 0.0,
+        planned_start=_opt_f(row.get("planned_start")),
+        planned_finish=_opt_f(row.get("planned_finish")),
+        predecessors=_list(row.get("predecessors")),
+        sed_ref=_s(row.get("sed_ref")) or None,
+        work_hours=_opt_f(row.get("work_hours")),
+        level_of_effort=_b(row.get("level_of_effort"), False),
+        actual_quantity=_f(row.get("actual_quantity"), 0.0) or 0.0,
+        actual_material_cost=_f(row.get("actual_material_cost"), 0.0) or 0.0,
+        actual_labor_cost=_f(row.get("actual_labor_cost"), 0.0) or 0.0,
+        note=_s(row.get("note")),
+    )
+    return wid, is_new
+
+
+def _apply_monitor_rule(model: EnterpriseModel, row: dict[str, Any]) -> tuple[str, bool]:
+    rid = _s(row.get("id"))
+    is_new = rid not in model.monitor_rules
+    model.monitor_rules[rid] = MonitorRule(
+        id=rid,
+        name=_s(row.get("name")),
+        description=_s(row.get("description")),
+        condition=_s(row.get("condition")),
+        severity=_enum(row.get("severity"), AlertSeverity, AlertSeverity.WARNING),
+        check_period_hours=_f(row.get("check_period_hours"), 24.0) or 24.0,
+        check_start=_f(row.get("check_start"), 0.0) or 0.0,
+        message=_s(row.get("message")),
+        enabled=_b(row.get("enabled")),
+    )
+    return rid, is_new
 
 
 def _apply_series(kind: str) -> Callable[[EnterpriseModel, dict[str, Any]], tuple[str, bool]]:
@@ -866,6 +978,7 @@ def _apply_series(kind: str) -> Callable[[EnterpriseModel, dict[str, Any]], tupl
 
 
 _APPLIERS: dict[str, Callable[[EnterpriseModel, dict[str, Any]], tuple[str, bool]]] = {
+    "enterprise": _apply_enterprise,
     "goals": _apply_goal,
     "utility_types": _apply_utility_type,
     "seds": _apply_sed,
@@ -888,11 +1001,15 @@ _APPLIERS: dict[str, Callable[[EnterpriseModel, dict[str, Any]], tuple[str, bool
     "calendars": _apply_calendar,
     "economic_items": _apply_economic_item,
     "economics": _apply_economics,
+    "projects": _apply_project,
+    "work_packages": _apply_work_package,
+    "monitor_rules": _apply_monitor_rule,
     "links": _apply_link,
     "gap_types": _apply_gap_type,
 }
 
 _TYPE_NAME = {
+    "enterprise": "enterprise_settings",
     "goals": "goal",
     "utility_types": "utility_type",
     "seds": "sed",
@@ -915,6 +1032,9 @@ _TYPE_NAME = {
     "calendars": "calendar",
     "economic_items": "economic_item",
     "economics": "economics_settings",
+    "projects": "project",
+    "work_packages": "work_package",
+    "monitor_rules": "monitor_rule",
     "links": "link",
     "gap_types": "gap_type",
 }
@@ -934,7 +1054,7 @@ def apply_rows(
         if not any(_s(v) for v in row.values()):
             continue
         needs_id = sheet not in (
-            "erp_mappings", "plans", "actuals", "initial_state", "economics",
+            "erp_mappings", "plans", "actuals", "initial_state", "economics", "enterprise",
         )
         if needs_id and not _s(row.get("id")):
             report.error(sheet, "отсутствует id", row=index)
@@ -966,7 +1086,7 @@ def model_to_rows(model: EnterpriseModel, sheet: str) -> tuple[list[str], list[l
         header = ["id", "name", "description", "goal_id", "parent_id", "org_unit_id",
                   "inputs", "outputs", "resources", "equipment_ids", "duration",
                   "triggers", "start_condition", "continuation_condition", "priority",
-                  "max_concurrent", "interruption_mode", "branches"]
+                  "max_concurrent", "interruption_mode", "branches", "duration_factor"]
         rows = [
             [s.id, s.name, s.description, s.goal_id or "", s.parent_id or "", s.org_unit_id or "",
              encode_flows(s.inputs), encode_flows(s.outputs), encode_requirements(s.resources),
@@ -974,7 +1094,7 @@ def model_to_rows(model: EnterpriseModel, sheet: str) -> tuple[list[str], list[l
              s.start_condition or "", s.continuation_condition or "", s.priority,
              s.max_concurrent or "", s.interruption_mode.value,
              json.dumps([b.model_dump(mode="json", exclude_defaults=True) for b in s.outcome_branches], ensure_ascii=False)
-             if s.outcome_branches else ""]
+             if s.outcome_branches else "", s.duration_factor]
             for s in model.seds.values()
         ]
     elif sheet == "resources":
@@ -1095,18 +1215,76 @@ def model_to_rows(model: EnterpriseModel, sheet: str) -> tuple[list[str], list[l
         ]
     elif sheet == "economic_items":
         header = ["id", "name", "description", "article", "kind", "basis", "direction",
-                  "ref", "rate", "expression", "enabled"]
+                  "ref", "rate", "expression", "enabled", "cash_category",
+                  "payment_delay_hours"]
         rows = [
             [i.id, i.name, i.description, i.article, i.kind.value, i.basis.value,
-             i.direction.value, i.ref or "", i.rate, i.expression or "", int(i.enabled)]
+             i.direction.value, i.ref or "", i.rate, i.expression or "", int(i.enabled),
+             i.cash_category, i.payment_delay_hours]
             for i in model.economic_items.values()
         ]
     elif sheet == "economics":
         e = model.economics
         header = ["currency", "discount_rate_annual", "hours_per_year", "warmup_hours",
-                  "include_control_costs", "control_article"]
+                  "include_control_costs", "control_article", "opening_cash",
+                  "report_bucket_hours"]
         rows = [[e.currency, e.discount_rate_annual, e.hours_per_year, e.warmup_hours,
-                 int(e.include_control_costs), e.control_article]]
+                 int(e.include_control_costs), e.control_article, e.opening_cash,
+                 e.report_bucket_hours]]
+    elif sheet == "enterprise":
+        ent = model.enterprise
+        header = ["start_date", "calendar_start_weekday", "planning_horizon_hours",
+                  "time_zone"]
+        rows = [[ent.start_date or "", ent.calendar_start_weekday,
+                 ent.planning_horizon_hours, ent.time_zone]]
+    elif sheet == "projects":
+        header = ["id", "name", "description", "planned_start", "planned_finish",
+                  "status_date", "status_label", "contract_value", "advance_payment",
+                  "advance_offset_share", "advance_paid_at", "billing_period_hours",
+                  "cash_category", "capitalize", "material_recognition",
+                  "material_price_factor", "labor_rate_factor",
+                  "start_not_before_planned", "priority", "enabled"]
+
+        def opt(value: Any) -> Any:
+            return "" if value is None else value
+
+        rows = [
+            [p.id, p.name, p.description, p.planned_start, opt(p.planned_finish),
+             opt(p.status_date), p.status_label, opt(p.contract_value), p.advance_payment,
+             p.advance_offset_share, p.advance_paid_at, p.billing_period_hours,
+             p.cash_category, int(p.capitalize), p.material_recognition.value,
+             p.material_price_factor, p.labor_rate_factor,
+             int(p.start_not_before_planned), p.priority, int(p.enabled)]
+            for p in model.projects.values()
+        ]
+    elif sheet == "work_packages":
+        header = ["id", "name", "project_ref", "object_name", "section", "unit",
+                  "planned_quantity", "material_unit_cost", "labor_unit_cost",
+                  "material_total", "labor_total", "delivery_cost", "equipment_cost",
+                  "planned_start", "planned_finish", "predecessors", "sed_ref",
+                  "work_hours", "level_of_effort", "actual_quantity",
+                  "actual_material_cost", "actual_labor_cost", "note"]
+
+        def opt(value: Any) -> Any:
+            return "" if value is None else value
+
+        rows = [
+            [w.id, w.name, w.project_ref, w.object_name, w.section, w.unit,
+             w.planned_quantity, w.material_unit_cost, w.labor_unit_cost,
+             opt(w.material_total), opt(w.labor_total), w.delivery_cost, w.equipment_cost,
+             opt(w.planned_start), opt(w.planned_finish), "; ".join(w.predecessors),
+             w.sed_ref or "", opt(w.work_hours), int(w.level_of_effort),
+             w.actual_quantity, w.actual_material_cost, w.actual_labor_cost, w.note]
+            for w in model.work_packages.values()
+        ]
+    elif sheet == "monitor_rules":
+        header = ["id", "name", "description", "condition", "severity",
+                  "check_period_hours", "check_start", "message", "enabled"]
+        rows = [
+            [m.id, m.name, m.description, m.condition, m.severity.value,
+             m.check_period_hours, m.check_start, m.message, int(m.enabled)]
+            for m in model.monitor_rules.values()
+        ]
     elif sheet == "links":
         header = ["id", "name", "description", "source_sed_id", "target_sed_id",
                   "utility_type_id", "health_criterion", "delay", "reaction_horizon",

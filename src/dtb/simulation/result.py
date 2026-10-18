@@ -47,6 +47,9 @@ class SimulationResult:
     control_costs: dict[str, Any] = field(default_factory=dict)
     economics: dict[str, Any] = field(default_factory=dict)
     warmup: dict[str, Any] = field(default_factory=dict)
+    projects: dict[str, Any] = field(default_factory=dict)
+    finance: dict[str, Any] = field(default_factory=dict)
+    monitoring: dict[str, Any] = field(default_factory=dict)
     sed_stats: dict[str, dict[str, Any]] = field(default_factory=dict)
     resource_stats: dict[str, dict[str, Any]] = field(default_factory=dict)
     utility_totals: dict[str, dict[str, float]] = field(default_factory=dict)
@@ -75,6 +78,9 @@ class SimulationResult:
             "control_costs": self.control_costs,
             "economics": self.economics,
             "warmup": self.warmup,
+            "projects": self.projects,
+            "finance": self.finance,
+            "monitoring": self.monitoring,
             "sed_stats": self.sed_stats,
             "resource_stats": self.resource_stats,
             "utility_totals": self.utility_totals,
@@ -121,6 +127,9 @@ class SimulationResult:
         result.control_costs = data.get("control_costs", {})
         result.economics = data.get("economics", {})
         result.warmup = data.get("warmup", {})
+        result.projects = data.get("projects", {})
+        result.finance = data.get("finance", {})
+        result.monitoring = data.get("monitoring", {})
         result.sed_stats = data.get("sed_stats", {})
         result.resource_stats = data.get("resource_stats", {})
         result.utility_totals = data.get("utility_totals", {})

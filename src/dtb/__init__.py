@@ -6,5 +6,5 @@ state is a vector of utility parameters, activity as a hierarchy of SED agents
 simulated in continuous model time between switching moments (МП).
 """
 
-__version__ = "0.1.0"
-ENGINE_VERSION = "1.0.0"
+__version__ = "0.2.0"
+ENGINE_VERSION = "1.1.0"

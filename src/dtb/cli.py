@@ -2,7 +2,7 @@
 
 Commands:
     dtb serve [--host 0.0.0.0] [--port 8000]   — run API + UI
-    dtb demo                                    — create the demo enterprise in the DB
+    dtb demo [--which all|plant|farm]           — create the demo enterprises in the DB
     dtb simulate <scenario_id> [--runs N] [--seed S]
     dtb validate <enterprise_id>
     dtb export-template <path.xlsx>
@@ -27,7 +27,11 @@ def main(argv: list[str] | None = None) -> int:
     p_serve.add_argument("--port", type=int, default=8000)
     p_serve.add_argument("--reload", action="store_true")
 
-    sub.add_parser("demo", help="создать демо-предприятие в базе")
+    p_demo = sub.add_parser("demo", help="создать демо-предприятия в базе")
+    p_demo.add_argument(
+        "--which", default="all", choices=["all", "plant", "farm"],
+        help="plant — «Демо-Завод», farm — «Агроферма: строительство», all — оба",
+    )
 
     p_sim = sub.add_parser("simulate", help="запустить симуляцию сценария")
     p_sim.add_argument("scenario_id")
@@ -86,16 +90,16 @@ def main(argv: list[str] | None = None) -> int:
     db = Database()
 
     if args.command == "demo":
-        from dtb.demo import create_demo
+        from dtb.demo import create_demos
 
-        model, scenarios = create_demo()
-        db.save_model(model)
-        db.save_version(model, author="cli", comment="demo model v1")
-        for scenario in scenarios:
-            db.save_scenario(scenario)
-        print(f"Создано предприятие {model.enterprise.id!r} и {len(scenarios)} сценариев:")
-        for scenario in scenarios:
-            print(f"  - {scenario.id}: {scenario.name}")
+        for model, scenarios in create_demos(args.which):
+            db.save_model(model)
+            db.save_version(model, author="cli", comment="demo model v1")
+            for scenario in scenarios:
+                db.save_scenario(scenario)
+            print(f"Создано предприятие {model.enterprise.id!r} и {len(scenarios)} сценариев:")
+            for scenario in scenarios:
+                print(f"  - {scenario.id}: {scenario.name}")
         return 0
 
     if args.command == "simulate":
